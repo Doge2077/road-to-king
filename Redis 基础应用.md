@@ -1,4 +1,4 @@
-# Redis 应用与原理
+# Redis 应用与原理（一）
 
 ****
 
@@ -121,5 +121,177 @@
 ****
 
 ## 数据类型&应用场景
+
+****
+
+### Redis 的 key 设计规范
+
+****
+
+Redis 常见的数据类型：字符串（String），哈希（Hash），列表（List），集合（Set），有序集合（Zset）
+
+![image-20240108224119079](https://image.itbaima.net/images/40/image-20240108229766334.png)
+
+对于 Key 的设计，一般遵循如下规范：
+
+- 可读性：一般以业务名（数据库名）为前缀，用冒号分割，例如：`数据库名:业务名:表名id`
+- 简洁性：保证可读性的前提下，Key 的长度越短越好，原则上每个 Key 不能超过 44 字节，不能包含特殊字符（空格、换行、转义）
+- 避免 BigKey：
+  - 情况一：键值对的值本身就很大，如 value 为 1 MB 的 string 类型，在业务层尽量将 string 大小控制在 10 KB 以下
+  - 情况二：键值对的值是集合类型，集合元素个数非常多，此时尽量把集合类型的元素个数控制在 1 万以下
+- 针对高频 Key 进行设计：一般只将热点数据的 Key 考虑加入 Redis，如即时排行榜、直播信息等
+
+****
+
+### String 类型
+
+****
+
+#### 基础概念
+
+****
+
+String 的底层结构是，简单动态字符串（Simple Dynamic String,SDS），特点：
+
+- SDS 不仅可以保存文本数据，还可以保存二进制数据
+- SDS 获取字符串长度的时间复杂度是 O(1)
+- Redis 的 SDS API 是安全的，拼接字符串不会造成缓冲区溢出
+
+在保存数字、小字符串时因为采用 INT 和 EMBSTR 编码，内存结构紧凑，只需要申请一次内存分配，效率更高，更节省内存。
+
+对于超过44字节的大字符串时则需要采用 RAW 编码，申请额外的 SDS 空间，需要两次内存分配，效率较低，内存占用也较高，但大小不超过 512 MB，因此建议单个 value 尽量不要超过 44 字节。
+
+****
+
+#### 应用场景
+
+****
+
+缓存对象：
+
+- `set key value` 单值缓存
+
+针对数值进行操作：
+
+- ```shell
+  # 设置数值数据增加指定范围的值
+  incr key
+  incrby key increment
+  incrbyfloat key increment
+  ```
+
+- ```shell
+  # 设置数值数据减少指定范围的值
+  decr key
+  decrby key increment
+  ```
+
+- ```shell
+  # 设置数据具有指定的生命周期
+  setex key seconds value
+  psetex key milliseconds value
+  ```
+
+分布式锁：`setnx key:xxx true` 设置分布式锁，用于请求限流 
+
+共享 session 信息：存储 session 信息，用于登录验证
+
+****
+
+#### 实战
+
+****
+
+主页高频访问信息显示控制，例如：新浪微博大 V 主页显示粉丝数与微博数量，需要针对这些高频访问的信息进行缓存处理
+
+**解决方案**：
+
+- 在 Redis 中为大 V 用户设定用户信息，以用户主键和属性值作为 Key，后台设定定时刷新策略即可
+
+- ```shell
+  user:id:3506728370:fans 114514
+  user:id:3506728370:blogs 1919
+  user:id:3506728370:focuses 810
+  ```
+
+- 使用 json 格式保存数据
+
+- ```shell
+  user:id:3506728370 {"fans":12210947, "blogs":6164, "focuses":83 }
+  ```
+
+****
+
+### Hash 类型
+
+****
+
+#### 基础概念
+
+****
+
+与 Java 中的 HashMap 类似，但底层结构是压缩列表和哈希表，特点：
+
+- 如果哈希类型元素个数小于 512（可设置 hash-max-ziplist-entries 修改），所有值小于 64 字节（可设置 hash-max-ziplist-value 修改），则会使用压缩列表作为底层数据结构
+- 不满足上述条件则会使用哈希表作为数据结构
+
+存储形式为：`key-value`，其中 `value=[{field1, value1}, {field2, value2}, {field3, value3}]`，如下图所示：
+
+![image-20240108234005984](https://image.itbaima.net/images/40/image-20240108234848886.png)
+
+与 Java 中的 HashMap 不同的是，Redis 中的 Hash 底层采用了渐进式 rehash 的算法，在做 rehash 时会创建一个新的 HashTable，每次操作元素时移动一部分数据，直到所有数据迁移完成，再用新的 HashTable 来代替旧的，避免了因为 rehash 导致的阻塞，因此性能更高。
+
+在 Redis 7.0 中，压缩列表数据结构已经废弃了，交由 listpack 数据结构来实现了（
+
+****
+
+#### 应用场景
+
+****
+
+对象缓存：
+
+- `HMSET user {userId}:username zhangfei {userId}:password 123456` 
+- `HMSET user 1:username zhangfei 1:password 123456` 
+- `HMGET user 1:username 1:password`
+
+针对数值进行操作：
+
+- ```shell
+  # 设置指定字段的数值数据增加指定范围的值
+  hincrby key field increment
+  hincrbyfloat key field increment
+  ```
+
+**注意**：
+
+- Hash 类型中 value 只能存储字符串，不允许存储其他数据类型，不存在嵌套现象。如果数据未获取到，对应的值为 `nil`
+- 每个 Hash 可以存储 $2^{32}-1$ 个键值对，但不可以将 Hash 作为对象列表使用
+- Hgetall 操作可以获取全部属性，如果内部 field 过多，遍历整体数据效率就很会低，有可能成为数据访问瓶颈
+
+****
+
+#### 实战
+
+****
+
+双十一期间，电商平台用户购物车信息存储，用户会对购物车信息进行频繁访问和修改
+
+**解决方案**：
+
+购物车信息存储：
+
+- 以用户 id 作为 Key
+- value 形式为 `{field1, value1}`，其中 `field1` 商品 `id`，`value1` 为数量，也可以选择型将价格、活动信息添加
+
+购物车操作：
+
+- 添加商品：`HSET cart:{userId} {商品Id} 1`
+- 添加数量：`HINCRBY cart{userId} {商品Id} 1`
+- 商品总数：`HLEN cart:{userId}`
+- 删除商品：`HDEL cart:{userId} {商品Id}`
+- 获取购物车内所有商品：`HGETALL cart:{userId}`
+
+当前仅仅是将商品 `id` 存储到了 Redis 中，在回显商品具体信息的时候，还需要拿着商品 `id` 查询一次数据库，获取完整的商品的信息
 
 ****
