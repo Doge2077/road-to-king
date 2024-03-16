@@ -1,4 +1,4 @@
-# Redis 应用与原理
+# Redis 原理与应用
 
 ****
 
@@ -511,17 +511,68 @@ BitMap 内部存储形式如图：
 - 如果是 Set 记录用户 ID（通常为长整型），那么每一个用户都需要 32 bit 的空间来存储
 - 如果是 BitMap，则只需要 1 bit 空间来表示用户是否登录即可
 
+**基础操作**：
+
+- `SETBIT`：为位数组指定偏移量上的二进制位设置值，偏移量从 0 开始计数，二进制位的值只能为 0 或 1。返回原位置值。
+- `GETBIT`：获取指定偏移量上二进制位的值。
+- `BITCOUNT`：统计位数组中值为 1 的二进制位数量。
+- `BITOP`：对多个位数组进行按位与、或、异或运算。
+
 ****
 
+#### 应用场景
 
+****
 
+签到统计，统计登录用户
 
+**解决方案**：
 
+- 签到统计时，每个用户一天的签到用 1 个 bit 位就能表示，一个月的签到情况最多用 31 个 bit 位
+- 签到操作：`SETBIT uid:online:202403 15 1` 设置 uid 的用户在 2024 年 3 月的 16 日进行了签到
+- 检查某天是否签到：`GETBIT uid:oneline:202403 15` 返回 1 说明 uid 用户在 2024 年 3 月的 16 日进行了签到
+- 统计某月签到次数：`BITCOUNT uid:oneline:202303` 
 
+****
 
+### Geo 地理位置类型
 
+****
 
+#### 基础概念
 
+****
 
+Redis3.2 中增加了对 GEO 类型的支持。GEO，Geographic，地理信息的缩写
 
+- 该类型，就是元素的二维坐标，在地图上就是经纬度
+- redis基于该类型，提供了经纬度设置，查询，范围查询，距离查询，经纬度Hash等常见操作
 
+**基础操作**：
+
+- 添加位置信息
+  - 添加某个位置的经纬度信息到指定集合中： `GEOADD location-set longitude latitude name [longitude latitude name...]`
+  - 例如，添加武汉的坐标信息到 `hubeiCities` 集合中：`GEOADD hubeiCities 114.32538 30.534535 wuhan`
+  - 连续添加多个：`GEOADD hubeiCities 112.161882 32.064505 xiangyang 111.305197 30.708127 yichang 111.583717 30.463363 zhijiang`
+- 获取位置坐标：
+  - 根据输入的位置名称和集合获取坐标：`GEOPOS location-set name [name ...]`
+  - 例如，查询武汉市的位置信息：`GEOPOS hubeiCities wuhan` 结果返回经度和纬度信息
+  - 连续查询多个：`GEOPOS hubeiCities xiangyang yichang zhijiang` 
+- 计算两个位置之间的距离：
+  - 在某个集合中获取其中两个位置的直线距离：`GEODIST location-set location-x location-y [unit]`
+  - 其中 `unit` 可选参数为 `m | km | mi | ft` 分别代表返回值的单位为米、千米、英里、英尺，不添加则默认单位为米
+  - 例如，计算武汉到宜昌的距离：`GEODIST hubeiCities wuhan yichang`
+- 指定经纬度坐标范围查询位置信息：
+  - 命令：`GEORADIUS location-set longitude latitude radius m|km|ft|mi [WITHCOORD] [WITHDIST] [ASC|DESC] [COUNT count]`
+  - `radius` 半径大小，可选单位米、千米、英里、英尺
+  - `WITHCOORD`：可选参数，添加则在返回匹配的位置时会将该位置的经纬度一并返回
+  - `WITHDIST`：可选参数，添加则在返回匹配的位置时会将该位置与中心点之间的距离一并返回
+  - `ASC|DESC`：可选参数，添加 `ASC` 将返回的匹配位置根据距离从近到远排序，`DESC` 则相反
+  - `COUNT`：可选参数，限制结果数量
+  - 例如，查找 `hubeiCities` 集合中 112.927076 28.235653 (长沙) 500km 以内的位置信息，查找结果中应包含不超过 5 个位置的坐标信息，距离信息，并按距离由近到远排序：`GEORADIUS hubeiCities 112.927076 28.235653 500 km withcoord withdist asc count 5`
+- 指定集合中某个位置范围查询位置信息：
+  - 命令：`GEORADIUSBYMEMBER location-set location radius m|km|ft|mi [WITHCOORD] [WITHDIST] [ASC|DESC] [COUNT count]`
+  - 参数和 `GEORADIUS ` 用法一致
+  - 例如，在 `hubeiCities` 位置集合中查找距离武汉200km 以内的位置信息（这里指定的目标位置只能是 `hubeiCities` 中存在的位置，而不能指定位置坐标），查找结果中应包含不超过 2 个位置的坐标信息，距离信息，并按距离由远到近排序：`GEORADIUSBYMEMBER hubeiCities wuhan 200 km withcoord withdist desc count 2`
+
+****
