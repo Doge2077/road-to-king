@@ -1763,21 +1763,152 @@ Redis 集群有16384个哈希槽，每个key通过CRC16校验后对16384取模�
 
 ****
 
+## 基于 Redis 实现分布式锁
 
+****
 
+### 基础实现
 
+****
 
+基于 Redis 实现分布式锁主要依赖于 `SETNX` 命令：
 
+- `SETNX key value`：若不存在 key 则设置 key 值为 value，返回 1
+- 若 key 已存在，则不做任何操作，返回 0
 
+为了防止某个线程获取锁之后异常结束没有释放锁，导致其他线程调用 `SETNX` 命令返回 0 而进入死锁，因此加锁后需要设置超时时间
 
+以下是一个简单的 SpringBoot demo：
 
+```java
+@RestController
+@RequestMapping("/sell")
+public class AppController {
+    @Resource
+    StringRedisTemplate stringRedisTemplate;
 
+    String LOCK = "TICKETSELLER";
+    String KEY = "TICKET";
 
+    @GetMapping("/ticket")
+    public void sellTicket() {
+        Boolean isLocked = stringRedisTemplate.opsForValue().setIfAbsent(LOCK, "1");
+        if (Boolean.TRUE.equals(isLocked)) {
+            // 设置过期时间 5s
+            stringRedisTemplate.expire(LOCK, 5, TimeUnit.SECONDS);
+            try {
+                // 拿到 ticket 的数量
+                int ticketCount = Integer.parseInt((String) stringRedisTemplate.opsForValue().get(KEY));
+                if (ticketCount > 0) {
+                    // 扣减库存
+                    stringRedisTemplate.opsForValue().set(KEY, String.valueOf(ticketCount - 1));
+                    System.out.println("I get a ticket!");
+                }
+            } catch (Exception e) {
+                e.printStackTrace();
+            } finally {
+                // 释放锁
+                stringRedisTemplate.delete(LOCK);
+            }
+        } else {
+            System.out.println("Field");
+        }
+    }
 
+}
+```
 
+****
 
+### 缺陷分析
 
+****
 
+#### 加锁和设置过期时间非原子操作
+
+****
+
+- 我们先是用 `SETNX` 创建了锁，假如这个服务在创建锁之后由于事故导致直接停机，那么这个锁就是一个永不过期的锁
+- 这将导致其他服务无法获取到锁，影响业务的正常进行
+
+解决方案：
+
+- 使用 LUA 脚本来进行加锁和设置过期时间的操作
+- 这样可以使得加锁和设置过期时间是一个原子操作
+
+```java
+@RestController
+@RequestMapping("/sell")
+public class AppController {
+    @Resource
+    StringRedisTemplate stringRedisTemplate;
+
+    String LOCK = "TICKETSELLER";
+    String KEY = "TICKET";
+
+    @GetMapping("/ticket")
+    public void sellTicket() {
+        // lua 脚本
+        String luaScript =
+                "if redis.call('setnx',KEYS[1],ARGV[1]) == 1 " +
+                        "then redis.call('expire',KEYS[1],ARGV[2]) ;" +
+                        "return true " +
+                "else return false " +
+                "end";
+        
+        // 回调函数返回加锁状态
+        Boolean isLocked = stringRedisTemplate.execute(new RedisCallback<Boolean>() {
+            @Override
+            public Boolean doInRedis(RedisConnection connection) throws DataAccessException {
+               return connection.eval(luaScript.getBytes(),
+                        ReturnType.BOOLEAN,
+                        1,
+                        LOCK.getBytes(),
+                        "1".getBytes(),
+                        "5".getBytes());
+            }
+        });
+        if (Boolean.TRUE.equals(isLocked)) {
+            try {
+                int ticketCount = Integer.parseInt((String) stringRedisTemplate.opsForValue().get(KEY));
+                if (ticketCount > 0) {
+                    stringRedisTemplate.opsForValue().set(KEY, String.valueOf(ticketCount - 1));
+                    System.out.println("I get a ticket!");
+                }
+            } catch (Exception e) {
+                e.printStackTrace();
+            } finally {
+                stringRedisTemplate.delete(LOCK);
+            }
+        } else {
+            System.out.println("Field");
+        }
+    }
+
+}
+```
+
+****
+
+#### 锁的过期时间设置是否合理
+
+****
+
+![](https://image.itbaima.cn/images/40/image-20240319003866632.png)
+
+假设现有服务 A 和服务 B，A 先拿到锁执行业务，但是由于业务过长导致 A 的锁到期后超时释放：
+
+- 如果 B 的业务还没结束，A 的业务结束进行释放锁的操作，A 就会错误的删除掉 B 加的锁，那 B 的业务执行完就无锁可释了
+- 如果 B 服务可以获取到锁了，B 加锁并执行他的业务，由于此时 A 也在执行业务，两个服务共享内存就容易造成超卖问题
+
+针对第一种问题的出现，解决方案很简单，只需要对锁的值做出限制即可：
+
+- 设置加锁 key 的值为唯一，如利用 uid + threadid
+- 在释放锁时判断是否是自己的锁，如果是则释放
+
+```
+
+```
 
 
 
