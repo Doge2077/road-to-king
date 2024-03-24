@@ -423,29 +423,55 @@ class SingleReactorClient implements  Runnable{
 
 ****
 
+# Reactor 线程模型
 
+****
 
+## 基础概念
 
+****
 
+Reactor 线程模型不是 Java专属，也不是 Netty 专属，它其实是一种并发编程模型，是一种思想，具有指导意义。
 
+Reactor 模型中定义了三种角色：
 
+- Reactor：负责监听和分配事件，将 I/O 事件分派给对应的 Handle，新的事件包含连接建立就绪、读就绪写就绪等
+- Acceptor：处理客户端新连接，并分派请求到处理器链中
+- Handler：将自身与事件绑定，执行非阻塞读/写任务，完成 Channel 的读入，完成处理业务逻辑后，负责将结果写出 Channel
 
+****
 
+## 单 Reactor
 
+****
 
+我们之前在 Java NIO 中实现的代码其实就是一个类似的 Reactor 单线程模型：
 
+![image-20240324173722934](https://image.itbaima.cn/images/40/image-20240324171733664.png)
 
+在 Reactor 单线程模型中：
 
+- 一个单独的线程运行一个事件循环，负责监听事件的发生（如网络请求）并将对应的处理工作委托给相应的处理器
+- 一旦事件被 Reactor检测到，就通知到程序中相应的事件处理器（Handler）来相应地处理这些事件
 
+这样的模型好处是编码简单，实现容易，但是所有的业务都需要依赖单线程执行，很容易达到性能瓶颈，因此可以将业务抽离出来放到线程池中执行，这就是单 Reactor 多线程模型：
 
+![image-20240324175554772](https://image.itbaima.cn/images/40/image-20240324173263805.png)
 
+****
 
+## 主从 Reactor
 
+****
 
+对于单 Reactor 多线程模型中，虽然我们已经将业务进行了分离，但是仍然存在缺陷：
 
+- 假如有多个 Handler 在执行 read 操作，则当前的线程仍然被阻塞
+- 对于其他 Client 发起的连接请求将会阻塞，这就存在丢失连接的风险
 
+对于服务器来说，接收客户端的连接是比较重要的，因此将这部分操作单独用线程去操作：
 
+![image-20240324181304451](https://image.itbaima.cn/images/40/image-20240324188957887.png)这里的 subReactor 可以有多个，但都只负责对连接建立事件的监听，已建立连接的 SocketChannel 将会注册到 MainReactor 中。
 
-
-
+****
 
