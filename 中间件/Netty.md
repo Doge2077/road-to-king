@@ -1,5 +1,7 @@
 # Java IO 模型
 
+本篇示例代码仓库：[learn-netty](https://github.com/Doge2077/learn-netty)
+
 ****
 
 ## 基础概念
@@ -650,5 +652,634 @@ inbound 入站事件处理顺序（方向）是由链表的头到链表尾，out
 
 ****
 
+# Hello World
 
+****
 
+## 引入依赖
+
+****
+
+```xml
+<dependency>
+	<groupId>io.netty</groupId>
+	<artifactId>netty-all</artifactId>
+	<version>4.1.42.Final</version>
+</dependency>
+```
+
+这里为了后续便于演示，添加 sl4j：
+
+```xml
+<dependency>
+    <groupId>org.slf4j</groupId>
+	<artifactId>slf4j-simple</artifactId>
+	<version>1.7.25</version>
+</dependency>
+<dependency>
+	<groupId>org.slf4j</groupId>
+	<artifactId>slf4j-api</artifactId>
+	<version>1.7.25</version>
+</dependency>
+```
+
+****
+
+## 编写 Server
+
+****
+
+### 配置 Server
+
+****
+
+```java
+public class NettyServer {
+
+    private static final Logger log = LoggerFactory.getLogger(NettyServer.class);
+
+    public static void main(String[] args) {
+        NettyServer NettyServer = new NettyServer();
+        NettyServer.start(8888);
+    }
+
+    public void start(int port) {
+        //创建 bossGroup workerGroup 分别管理连接建立事件和具体的业务处理事件
+        EventLoopGroup boss = new NioEventLoopGroup();
+        EventLoopGroup worker = new NioEventLoopGroup();
+        try {
+            //创建启动引导类
+            ServerBootstrap serverBootstrap = new ServerBootstrap();
+            //配置参数
+            serverBootstrap.group(boss,worker)
+                    .channel(NioServerSocketChannel.class)       //指定服务端通道，用于接收并创建新连接
+                    .handler(new LoggingHandler(LogLevel.DEBUG)) // 给 boss group 配置 handler
+                    .childHandler(new ChannelInitializer<SocketChannel>() {
+                        //每个客户端 channel 初始化时都会执行该方法来配置该 channel 的相关 handler
+                        @Override
+                        protected void initChannel(SocketChannel ch) throws Exception {
+                            //获取与该 channel 绑定的 pipeline
+                            ChannelPipeline pipeline = ch.pipeline();
+                            //向 pipeline 中添加 handler，如果没有注册到这里则不会生效
+                            pipeline.addLast(new ServerOutboundHandler1());
+                            pipeline.addLast(new ServerInboundHandler1());
+                            pipeline.addLast(new ServerInboundHandler2());
+                        }
+                    }); //给 worker group 配置 handler
+            //服务端绑定端口启动
+            ChannelFuture future = serverBootstrap.bind(port).sync();
+            //服务端监听端口关闭
+            future.channel().closeFuture().sync();
+        } catch (Exception e) {
+            log.error("netty server error ,{}",e.getMessage());
+        } finally {
+            //优雅关闭 boss worker
+            boss.shutdownGracefully();
+            worker.shutdownGracefully();
+        }
+    }
+}
+```
+
+这样我们就配置好了服务端，我们需要做的就是完成 worker 的 Pipeline 中各个 Handler 的处理逻辑即可
+
+****
+
+### 编写 Handler
+
+****
+
+对于入站处理数据，需要一个 Inbound 类型的 Handler：
+
+```java
+public class ServerInboundHandler1 extends ChannelInboundHandlerAdapter {
+    private static final Logger log = LoggerFactory.getLogger(ServerInboundHandler1.class);
+
+    /**
+     * 通道准备就绪时
+     *
+     * @param ctx
+     * @throws Exception
+     */
+    @Override
+    public void channelActive(ChannelHandlerContext ctx) throws Exception {
+        log.info("ServerInboundHandler1 channelActive-----");
+
+        //将事件向下传递
+        ctx.fireChannelActive();
+    }
+
+    /**
+     * 通道有数据可读时
+     *
+     * @param ctx
+     * @param msg
+     * @throws Exception
+     */
+    @Override
+    public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
+        log.info("ServerInboundHandler1 channelRead----,remoteAddress={}", ctx.channel().remoteAddress());
+        //处理接收的数据
+        ByteBuf buf = (ByteBuf) msg;
+        log.info("ServerInboundHandler1:received client data = {}", buf.toString(StandardCharsets.UTF_8));
+
+        //将事件消息向下传递，如果不传递则 msg 不会到达下一个 handler
+        ctx.fireChannelRead(msg);
+    }
+
+    /**
+     * 数据读取完毕时
+     *
+     * @param ctx
+     * @throws Exception
+     */
+    @Override
+    public void channelReadComplete(ChannelHandlerContext ctx) throws Exception {
+        log.info("channelReadComplete----");
+        //数据读取结束后向客户端写回数据
+        byte[] data = "hello client , i am server".getBytes(StandardCharsets.UTF_8);
+        ByteBuf buffer = Unpooled.buffer(data.length);
+        buffer.writeBytes(data);//以bytebuf为中心,看是写到bytebuf中还是从bytebuf中读
+        ByteBuf buf = Unpooled.copiedBuffer("hello client , i am server", StandardCharsets.UTF_8);
+        ctx.writeAndFlush(buf);//通过ctx写，事件会从当前handler向pipeline头部移动
+        //ctx.channel().writeAndFlush(buf);//通过Channel写,事件会从通道尾部向头部移动
+    }
+
+    /**
+     * 发生异常时
+     *
+     * @param ctx
+     * @param cause
+     * @throws Exception
+     */
+    @Override
+    public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
+        log.info("ServerInboundHandler1 exceptionCaught----,cause={}", cause.getMessage());
+    }
+}
+```
+
+这里要注意，如果该 Handler 需要向下传递数据，即要让他之后的 Handler 也拿到 msg，需要在 channelRead 内 ChannelHandlerContext 的 fireChannelRead 方法
+
+再来一个 ServerInboundHandler2 进行 msg 传递测试：
+
+```java
+public class ServerInboundHandler2 extends ChannelInboundHandlerAdapter {
+    private static final Logger log = LoggerFactory.getLogger(ServerInboundHandler2.class);
+
+    @Override
+    public void channelActive(ChannelHandlerContext ctx) throws Exception {
+        log.info("ServerInboundHandler2 channelActive-----");
+    }
+
+    @Override
+    public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
+        log.info("ServerInboundHandler2 channelRead----,remoteAddress={}", ctx.channel().remoteAddress());
+        //处理接收的数据
+        ByteBuf buf = (ByteBuf) msg;
+        log.info("ServerInboundHandler2:received client data = {}", buf.toString(StandardCharsets.UTF_8));
+    }
+
+    @Override
+    public void channelReadComplete(ChannelHandlerContext ctx) throws Exception {
+        log.info("ServerInboundHandler2 channelReadComplete----");
+    }
+
+    @Override
+    public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
+    }
+}
+```
+
+在数据处理完后，会由 tail 节点写回，我们也可以编写 Outbound 类型的 Handler 来添加对出站数据的处理：
+
+```java
+public class ServerInboundHandler1 extends ChannelInboundHandlerAdapter {
+    private static final Logger log = LoggerFactory.getLogger(ServerInboundHandler1.class);
+
+    /**
+     * 通道准备就绪时
+     *
+     * @param ctx
+     * @throws Exception
+     */
+    @Override
+    public void channelActive(ChannelHandlerContext ctx) throws Exception {
+        log.info("ServerInboundHandler1 channelActive-----");
+
+        //将事件向下传递
+        //ctx.fireChannelActive();
+        super.channelActive(ctx);
+    }
+
+    /**
+     * 通道有数据可读时
+     *
+     * @param ctx
+     * @param msg
+     * @throws Exception
+     */
+    @Override
+    public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
+        log.info("ServerInboundHandler1 channelRead----,remoteAddress={}", ctx.channel().remoteAddress());
+        //处理接收的数据
+        ByteBuf buf = (ByteBuf) msg;
+        log.info("ServerInboundHandler1:received client data = {}", buf.toString(StandardCharsets.UTF_8));
+
+        //将事件消息向下传递，如果不传递则 msg 不会到达下一个 handler
+        ctx.fireChannelRead(msg);
+//        super.channelRead(ctx, msg);
+    }
+
+    /**
+     * 数据读取完毕时
+     *
+     * @param ctx
+     * @throws Exception
+     */
+    @Override
+    public void channelReadComplete(ChannelHandlerContext ctx) throws Exception {
+        log.info("channelReadComplete----");
+        //数据读取结束后向客户端写回数据
+        byte[] data = "hello client , i am server".getBytes(StandardCharsets.UTF_8);
+        ByteBuf buffer = Unpooled.buffer(data.length);
+        buffer.writeBytes(data);//以bytebuf为中心,看是写到bytebuf中还是从bytebuf中读
+        ByteBuf buf = Unpooled.copiedBuffer("hello client , i am server", StandardCharsets.UTF_8);
+        ctx.writeAndFlush(buf);//通过ctx写，事件会从当前handler向pipeline头部移动
+        //ctx.channel().writeAndFlush(buf);//通过Channel写,事件会从通道尾部向头部移动
+    }
+
+    /**
+     * 发生异常时
+     *
+     * @param ctx
+     * @param cause
+     * @throws Exception
+     */
+    @Override
+    public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
+        log.info("ServerInboundHandler1 exceptionCaught----,cause={}", cause.getMessage());
+    }
+}
+```
+
+这里注意，在写回数据时;
+
+- 如果调用的是 `ctx.channel().writeAndFlush()`：则会从 tail 节点从后往前寻找 Outbound 类型的 Handler 节点处理
+- 如果调用的是 `ctx.writeAndFlush()`：则会从当前的 Handler 流向 head
+
+****
+
+## 编写 Client
+
+****
+
+### 配置 Client
+
+****
+
+```java
+public class NettyClient {
+
+    private static final Logger log = LoggerFactory.getLogger(NettyClient.class);
+
+    public static void main(String[] args) {
+        NettyClient client = new NettyClient();
+        client.start("127.0.0.1", 8888);
+    }
+
+    public void start(String host, int port) {
+        EventLoopGroup group = new NioEventLoopGroup();
+        try {
+            Bootstrap bootstrap = new Bootstrap();
+            bootstrap.group(group)
+                    .channel(NioSocketChannel.class)
+                    .handler(new ChannelInitializer<SocketChannel>() {
+                        @Override
+                        protected void initChannel(SocketChannel ch) throws Exception {
+                            ChannelPipeline pipeline = ch.pipeline();
+                            //添加客户端 channel 对应的 handler
+                            pipeline.addLast(new ClientInboundHandler1());
+                            pipeline.addLast(new ClientSimpleInboundHandler2());
+                        }
+                    });
+            //连接远程启动
+            ChannelFuture future = bootstrap.connect(host, port).sync();
+            //监听通道关闭
+            future.channel().closeFuture().sync();
+        } catch (Exception e) {
+            log.error("netty client error ,msg={}", e.getMessage());
+        } finally {
+            //优雅关闭
+            group.shutdownGracefully();
+        }
+    }
+}
+```
+
+和服务端一样，只不过客户端不需要 worker，只需要完成当前 Pipeline 中各个 Handler 的处理逻辑即可
+
+****
+
+### 编写 Handler
+
+****
+
+```java
+public class ClientInboundHandler1 extends ChannelInboundHandlerAdapter {
+    private static final Logger log = LoggerFactory.getLogger(ClientInboundHandler1.class);
+
+    /**
+     * 通道准备就绪
+     *
+     * @param ctx
+     * @throws Exception
+     */
+    @Override
+    public void channelActive(ChannelHandlerContext ctx) throws Exception {
+        log.info("ClientInboundHandler1 channelActive begin send data");
+        //通道准备就绪后开始向服务端发送数据
+        ByteBuf buf = Unpooled.copiedBuffer("hello server,i am client".getBytes(StandardCharsets.UTF_8));
+        ctx.writeAndFlush(buf);
+    }
+
+    /**
+     * 通道有数据可读（服务端返回了数据）
+     *
+     * @param ctx
+     * @param msg
+     * @throws Exception
+     */
+    @Override
+    public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
+        log.info("ClientInboundHandler1 channelRead");
+        ByteBuf buf = (ByteBuf) msg;
+        log.info("ClientInboundHandler1: received server data ={}", buf.toString(StandardCharsets.UTF_8));
+
+        // 接着传递消息给下一个 ChannelInboundHandler
+        ctx.fireChannelRead(msg);
+    }
+
+    /**
+     * 数据读取完毕
+     *
+     * @param ctx
+     * @throws Exception
+     */
+    @Override
+    public void channelReadComplete(ChannelHandlerContext ctx) throws Exception {
+        super.channelReadComplete(ctx);
+    }
+
+    /**
+     * 产生了异常
+     *
+     * @param ctx
+     * @param cause
+     * @throws Exception
+     */
+    @Override
+    public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
+        super.exceptionCaught(ctx, cause);
+    }
+}
+```
+
+同样的，Client 的 ChannelInboundHandler 在 channelRead 也需要 fireChannelRead 才能将 msg 向后传递
+
+这里继续编写一个 Handler 用于测试 msg 传递：
+
+```java
+public class ClientSimpleInboundHandler2 extends SimpleChannelInboundHandler<ByteBuf> {
+    private static final Logger log = LoggerFactory.getLogger(ClientSimpleInboundHandler2.class);
+
+    @Override
+    protected void channelRead0(ChannelHandlerContext ctx, ByteBuf msg) throws Exception {
+        log.info("ClientSimpleInboundHandler2 channelRead");
+        log.info("ClientSimpleInboundHandler2: received server data ={}", msg.toString(StandardCharsets.UTF_8));
+    }
+
+}
+```
+
+****
+
+# Netty 核心组件剖析
+
+****
+
+这里我们仍然基于上述的 Netty 线程模型来看：
+
+![image-20240325211729921](https://image.itbaima.cn/images/40/image-20240325212635047.png)
+
+****
+
+## Bootstrap
+
+****
+
+Bootstrap 是引导的意思，它的作用是配置整个 Netty 程序，将各个组件都串起来，最后绑定端口、启动 Netty 服务
+
+Netty 中提供了两种类型的引导类：
+
+- 用于客户端的 Bootstrap
+- 用于服务端的 ServerBootstrap
+
+ServerBootstrap 将绑定到一个端口，因为服务器必须要监听连接，而 Bootstrap 则是由想要连接到远程节点的客户端应用程序所使用的
+
+引导一个客户端只需要一个 EventLoopGroup，但是一个 ServerBootstrap 则需要两个
+
+****
+
+## Channel
+
+****
+
+Netty 中的 Channel 是与网络套接字相关的，可以理解为是 socket 连接
+
+在客户端与服务端连接的时候就会建立一个Channel，它负责基本的 IO 操作，比如：bind()、connecti()、read()、write()等
+
+主要作用：
+
+- 通过 Channel 可获得当前网络连接的通道状态
+- 通过Channel 可获得网络连接的配置参数（缓冲区大小等)
+- Channel 提供异步的网络I/O操作，比如连接的建立、数据的读写、端口的绑定等
+
+不同协议、不同的 I/O 类型的连接都有不同的 Channel 类型与之对应
+
+****
+
+## EventLoopGroup & EventLoop
+
+****
+
+Netty 是基于事件驱动的，比如：连接注册，连接激活；数据读取；异常事件等等，有了事件，就需要一个组件去监控事件的产生和事件的协调处理——这个组件就是 EventLoop（事件循环/EventExecutor)
+
+在 Netty 中，每个 Channel 都会被分配到一个 EventLoop，一个 EventLoop 可以服务于多个 Channel，每个 EventLoop 会占用一个Thread，同时这个 Thread 会处理 EventLoop 上面发生的所有 IO 操作和事件
+
+EventLoopGroup 是用来生成 EventLoop 的，包含了一组 EventLoop，可以初步理解成 Netty 线程池
+
+在我们之前的示例代码中，EventLoopGroup 是接口，我们采用的实现是 NioEventLoopGroup：
+
+```java
+// 主线程，不处理任何业务逻辑，只是接收客户的连接请求
+EventLoopGroup boss = new NioEventLoopGroup();
+// 工作线程，处理注册其上 Channel的 I/O 事件及其他 Task
+EventLoopGroup worker = new NioEventLoopGroup();
+```
+
+这里查看 NioEventLoopGroup 源码，继承自 MultithreadEventLoopGroup：
+
+```java
+private static final int DEFAULT_EVENT_LOOP_THREADS = Math.max(1, SystemPropertyUtil.getInt("io.netty.eventLoopThreads", NettyRuntime.availableProcessors() * 2));
+```
+
+其中 `DEFAULT_EVENT_LOOP_THREADS` 表示默认的核心线程数：
+
+- 核心线程数默认为 max(1, CPU 核心数 * 2)
+
+- 核心线程数在创建时可通过构造函数指定
+
+对于 bossgroup，我们其实也只用到了其中的一个线程，因为服务端一般只会绑定一个端口启动
+
+****
+
+## ChannelHandler 复用
+
+****
+
+每个客户端 Channel 创建后初始化时均会向与该 Channel 绑定的 Pipeline 中添加 Handler，此种模式下，每个 Channel 享有的是各自独立的 Handler，例如之前 NettyServer 中的配置初始化：
+
+```java
+ .childHandler(new ChannelInitializer<SocketChannel>() {
+                        //每个客户端 channel 初始化时都会执行该方法来配置该 channel 的相关 handler
+                        @Override
+                        protected void initChannel(SocketChannel ch) throws Exception {
+                            //获取与该 channel 绑定的 pipeline
+                            ChannelPipeline pipeline = ch.pipeline();
+                            //向 pipeline 中添加 handler，如果没有注册到这里则不会生效
+                            pipeline.addLast(new ServerOutboundHandler1());
+                            pipeline.addLast(new ServerInboundHandler1());
+                            pipeline.addLast(new ServerInboundHandler2());
+                        }
+```
+
+原先上述方式会给每次新注册进来的 Channel 初始化新的 Handler，如果我们稍作修改：
+
+```java
+public class NettyServer {
+
+    private static final Logger log = LoggerFactory.getLogger(NettyServer.class);
+
+    public static void main(String[] args) {
+        NettyServer NettyServer = new NettyServer();
+        NettyServer.start(8888);
+    }
+
+    public void start(int port) {
+        //创建 bossGroup workerGroup 分别管理连接建立事件和具体的业务处理事件
+        EventLoopGroup boss = new NioEventLoopGroup();
+        EventLoopGroup worker = new NioEventLoopGroup();
+
+        // 只创建一次 serverInboundHandler2 对象
+        ServerInboundHandler2 serverInboundHandler2 = new ServerInboundHandler2();
+
+        try {
+            //创建启动引导类
+            ServerBootstrap serverBootstrap = new ServerBootstrap();
+            //配置参数
+            serverBootstrap.group(boss,worker)
+                    .channel(NioServerSocketChannel.class)       //指定服务端通道，用于接收并创建新连接
+                    .handler(new LoggingHandler(LogLevel.DEBUG)) // 给 boss group 配置 handler
+                    .childHandler(new ChannelInitializer<SocketChannel>() {
+                        //每个客户端 channel 初始化时都会执行该方法来配置该 channel 的相关 handler
+                        @Override
+                        protected void initChannel(SocketChannel ch) throws Exception {
+                            //获取与该 channel 绑定的 pipeline
+                            ChannelPipeline pipeline = ch.pipeline();
+                            //向 pipeline 中添加 handler，如果没有注册到这里则不会生效
+                            pipeline.addLast(new ServerOutboundHandler1());
+                            pipeline.addLast(new ServerInboundHandler1());
+                            // 在这里对 serverInboundHandler2 进行复用
+                            pipeline.addLast(serverInboundHandler2);
+                        }
+                    }); //给 worker group 配置 handler
+            //服务端绑定端口启动
+            ChannelFuture future = serverBootstrap.bind(port).sync();
+            //服务端监听端口关闭
+            future.channel().closeFuture().sync();
+        } catch (Exception e) {
+            log.error("netty server error ,{}",e.getMessage());
+        } finally {
+            //优雅关闭 boss worker
+            boss.shutdownGracefully();
+            worker.shutdownGracefully();
+        }
+    }
+}
+```
+
+如果我们此时直接运行两个 NettyClient 实例并且绑定到这个 NettyServer，则第二个运行的实例将会报错：
+
+```java
+[nioEventLoopGroup-2-1] INFO handler.client.ClientInboundHandler1 - ClientInboundHandler1 channelActive begin send data
+[nioEventLoopGroup-2-1] WARN io.netty.channel.DefaultChannelPipeline - An exceptionCaught() event was fired, and it reached at the tail of the pipeline. It usually means the last handler in the pipeline did not handle the exception.
+java.io.IOException: 你的主机中的软件中止了一个已建立的连接。
+	at java.base/sun.nio.ch.SocketDispatcher.read0(Native Method)
+	at java.base/sun.nio.ch.SocketDispatcher.read(SocketDispatcher.java:46)
+	at java.base/sun.nio.ch.IOUtil.readIntoNativeBuffer(IOUtil.java:330)
+	at java.base/sun.nio.ch.IOUtil.read(IOUtil.java:284)
+	at java.base/sun.nio.ch.IOUtil.read(IOUtil.java:259)
+	at java.base/sun.nio.ch.SocketChannelImpl.read(SocketChannelImpl.java:417)
+	at io.netty.buffer.PooledByteBuf.setBytes(PooledByteBuf.java:247)
+	at io.netty.buffer.AbstractByteBuf.writeBytes(AbstractByteBuf.java:1147)
+	at io.netty.channel.socket.nio.NioSocketChannel.doReadBytes(NioSocketChannel.java:347)
+	at io.netty.channel.nio.AbstractNioByteChannel$NioByteUnsafe.read(AbstractNioByteChannel.java:148)
+	at io.netty.channel.nio.NioEventLoop.processSelectedKey(NioEventLoop.java:700)
+	at io.netty.channel.nio.NioEventLoop.processSelectedKeysOptimized(NioEventLoop.java:635)
+	at io.netty.channel.nio.NioEventLoop.processSelectedKeys(NioEventLoop.java:552)
+	at io.netty.channel.nio.NioEventLoop.run(NioEventLoop.java:514)
+	at io.netty.util.concurrent.SingleThreadEventExecutor$6.run(SingleThreadEventExecutor.java:1044)
+	at io.netty.util.internal.ThreadExecutorMap$2.run(ThreadExecutorMap.java:74)
+	at io.netty.util.concurrent.FastThreadLocalRunnable.run(FastThreadLocalRunnable.java:30)
+	at java.base/java.lang.Thread.run(Thread.java:840)
+
+Process finished with exit code 0
+```
+
+如果想要实现 ChannelHandler 复用，则只需要在对应需要复用的 Handler 上添加 @Shareble 注解即可：
+
+![image-20240326162515692](https://image.itbaima.cn/images/40/image-20240326164394421.png)
+
+对 ServerInboundHandler2 添加注解即可：
+
+```java
+@ChannelHandler.Sharable
+public class ServerInboundHandler2 extends ChannelInboundHandlerAdapter {
+    private static final Logger log = LoggerFactory.getLogger(ServerInboundHandler2.class);
+
+    @Override
+    public void channelActive(ChannelHandlerContext ctx) throws Exception {
+        log.info("ServerInboundHandler2 channelActive-----");
+    }
+
+    @Override
+    public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
+        log.info("ServerInboundHandler2 channelRead----,remoteAddress={}", ctx.channel().remoteAddress());
+        //处理接收的数据
+        ByteBuf buf = (ByteBuf) msg;
+        log.info("ServerInboundHandler2:received client data = {}", buf.toString(StandardCharsets.UTF_8));
+    }
+
+    @Override
+    public void channelReadComplete(ChannelHandlerContext ctx) throws Exception {
+        log.info("ServerInboundHandler2 channelReadComplete----");
+    }
+
+    @Override
+    public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
+    }
+}
+```
+
+****
