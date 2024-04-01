@@ -1283,3 +1283,196 @@ public class ServerInboundHandler2 extends ChannelInboundHandlerAdapter {
 ```
 
 ****
+
+## SimpleChannelInboundHandler
+
+****
+
+对于编写 Netty 数据入站处理器，可以选择继承 `ChannellnboundHandlerAdapter`，也可以选择继 `SimpleChannellnboundHandlers<I>` 区别是什么？
+
+对于继承了 ChannellnboundHandlerAdapter 的 channelRead 方法：
+
+```java
+	@Override
+    public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
+        log.info("ServerInboundHandler1 channelRead----,remoteAddress={}", ctx.channel().remoteAddress());
+        //处理接收的数据
+        ByteBuf buf = (ByteBuf) msg;
+        log.info("ServerInboundHandler1:received client data = {}", buf.toString(StandardCharsets.UTF_8));
+
+        //将事件消息向下传递，如果不传递则 msg 不会到达下一个 handler
+        ctx.fireChannelRead(msg);
+    }
+```
+
+其中 msg 是 Object 类型的，因此在当前 Handler 处理时需要判断上一个 Handler 处理的 msg 是什么类型的，在之前的示例中，我们默认了处理的 msg 都是 ByteBuf 类型，每次处理都要做强制转换。
+
+对于 `SimpleChannellnboundHandlers<I>`，本质上也是继承自 `ChannellnboundHandlerAdapter`，但仅仅对其中的 channelRead 方法进行了重写：
+
+```java
+	public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
+        boolean release = true;
+        try {
+            // 判断是否是接收
+            if (this.acceptInboundMessage(msg)) {
+                // 调用 channelRead0 方法
+                this.channelRead0(ctx, msg);
+            } else {
+                release = false;
+                ctx.fireChannelRead(msg);
+            }
+        } finally {
+            if (this.autoRelease && release) {
+                // 对原始资源释放
+                ReferenceCountUtil.release(msg);
+            }
+
+        }
+
+    }
+```
+
+继承 SimpleChannellnboundHandler 需要重写channelRead0方法，且可以通过泛型指定 msg 类型：
+
+```java
+protected abstract void channelRead0(ChannelHandlerContext var1, I var2) throws Exception;
+```
+
+是一个抽象方法，参数将 var2 作为泛型指定，因此在使用 `SimpleChannellnboundHandlers<I>` 指定的类型后，只需要重写 channelRead0 方法可以帮我们把 msg 来转换。
+
+**注意**：
+
+- SimpleChannellnboundHandler 在接收到数据后会自动 release 掉数据占用的 Bytebuffer 资源
+- 服务端异步处理数据，服务端想把客户端发送来的数据再写回等等场景下最好不要继承 SimpleChannellnboundHandler
+- 客户端推荐使用 SimpleChannellnboundHandler，服务端看场景
+
+****
+
+## ByteBuf
+
+****
+
+### 基础定义
+
+****
+
+Java NIO 提供了 ByteBuffer 作为它的字节容器，但是这个类使用起来过于复杂，而且也有些繁琐。
+
+Netty 使用 ByteBuf 来替代 ByteBuffer，它是一个强大的实现，既解决了 JDK API 的局限性，又为网络应用程序的开发者提供了更好的 API。
+
+从结构上来说：
+
+- ByteBuf由一串字节数组构成，数组中每个字节用来存放信息
+- ByteBuf提供了两个索引，一个用于读取数据（readerlndex），一个用于写入数据（writerlndex）
+- 这两个索引通过在字节数组中移动，来定位需要读或者写信息的位置
+- 而 JDK 的 ByteBuffer 只有一个索引，因此需要使用flip方法进行读写切换
+
+![image-20240401100837338](https://image.itbaima.cn/images/40/image-20240401101659546.png)
+
+- readerlndex：
+  - 指示读取的起始位置
+  - 每读取一个字节，readerlndex 自增累加 1
+  - 如果 readerlndex与 writerlndex 相等，ByteBuf 不可读
+- writerlndex：
+  - 指示写入的起始位置
+  - 每写入一个字节，writelndex自增累加l
+  - 如果增加到 writerlndex 与 capacity() 容量相等，表示 ByteBuf 已经不可写
+- maxCapacity：
+  - 指示 ByteBuf 可以扩容的最大容量
+  - 如果向 ByteBuf 写入数据时，容量不足，该值表示可以进行扩容的最大容量
+
+如果 writerlndex 与 capacity() 容量相等时继续向 ByteBuf 中写数据，Netty 会自动扩容 ByteBuf，直到扩容到底层的内存大小为 maxCapacity
+
+****
+
+### 三种模式
+
+****
+
+- 堆缓冲区(HeapByteBuf)：
+  - 内存分配在jvm堆，分配和回收速度比较快，可以被VM自动回收
+  - 缺点是：如果进行 socket 的 IO 读写，需要额外做一次内存复制，将堆内存对应的缓冲区复制到内核 Channe l中，性能会有一定程度的下降
+  - 由于在堆上被 JVM管理，在不被使用时可以快速释放，可以通过ByteBuf.array() 来获取 byte[] 数据
+- 直接缓冲区(DirectByteBuf)：
+  - 内存分配的是堆外内存（系统内存)，相比堆内存，它的分配和回收速度会慢一些
+  - 但是将它写入或从 Socket Channel 中读取时，由于减少了一次内存拷贝，速度比堆内存块
+- 复合缓冲区(CompositeByte Buf)：
+  - 将两个不同的缓冲区从逻辑上合并，让使用更加方便
+
+Netty 默认使用的是DirectByteBuf,如果需要使用HeapByteBuf模式，则需要进行系统参数的设置：
+
+```java
+// 设置 HeapByteBuf 模式，但 ByteBuf 的分配器 ByteBufAllocator 要设置为非池化，否则不能切换到堆缓冲器模式
+System.setProperty("io.netty.noUnsafe","true");
+```
+
+****
+
+### BufAllocator
+
+****
+
+Netty 提供了两种 ByteBufAllocator 的实现，分别是：
+
+- PooledByteBufAllocator：
+  - 实现了 ByteBuf 的对象的池化，提高性能减少并最大限度地减少内存碎片
+  - 池化思想：通过预先申请一块专用内存地址作为内存池进行管理，从而不需要每次都进行分配和释放
+- UnpooledByteBufAllocator：
+  - 没有实现对象的池化，每次会生成新的对象实例
+
+Netty 默认使用了PooledByteBufAllocator，但可以通过引导类设置非池化模式
+
+参考源码 DefaultChannelConfig 中的 allocator属性：
+
+```java
+//引导类中设置非池化模式
+bootstrap.childOption(ChannelOption.ALLOCATOR,UnpooledByteBufAllocator.DEFAULT)
+//或者通过系统参数设置
+System.setProperty("io.netty.allocator.type","pooled");
+System.setProperty("io.netty.allocator.type","unpooled");
+```
+
+对于 Pooled 类型的 ByteBuf ：
+
+- 不管是 PooledDirectByteBuf 还是 PooledHeapByteBufa 都只能由 Netty 内部自己使用（构造是私有和受保护的)
+- 开发者可以使用 Unpooled 类型的 ByteBuf
+
+Netty 提供 Unpooled 工具类创建的 ByteBuf 都是 unpooled 类型，默认采用的 Allocator 是 direct 类型；当然用户可以自己选择创建 UnpooledDirectByteBuf 和 UnpooledHeapByteBuf
+
+****
+
+### ByteBuf 释放机制
+
+****
+
+ByteBuf 不同模式下的释放：
+
+- ByteBuf 如果采用的是堆缓冲区模式的话，可以由GC回收
+- 但是如果采用的是直接缓冲区，就不受GC的管理，就得手动释放，否则会发生内存泄露
+
+Netty 自身引入了引用计数，提供了 ReferenceCounted 接口，当对象的 引用计数 > 0 时要保证对象不被释放，当为 0 时需要被释放，这里分为手动释放和自动释放：
+
+- 手动释放：
+  - 就是在使用完成后，调用ReferenceCountUtil..release(byte Buf) 进行释放
+  - 这种方式的弊端就是一旦忘记释放就可能会造成内存泄露
+- 自动释放：
+  - 有三种方式，分别是入站的TailHandler(TailContext)、继承SimpleChannellnboundHandler 和 HeadHandler(HeadContext)的出站释放
+  - TailContext：Inbound 流水线的末端，如果前面的nandler都把消息向后传递最终由TailContext释放该消息，需
+    要注意的是，如果没有进行向下传递，是不会进行释放操作的
+  - SimpleChannellnboundHandler：自定义的 InboundHandler 继承自 SimpleChannellnboundHandler，在 SimpleChannellnboundHandler 中自动释放
+  - HeadContext:outbound：流水线的末端，出站消息一般是由应用所申请，到达最后一站时，经过一轮复杂的调用，在 flush 完成后终将被 release 掉
+
+总结：
+
+- 对于入站消息：
+  - 对原消息不做处理，依次调用 ctx.fireChannelRead(msg) 把原消息往下传，如果能到TailContext，那不用做什么释放，它会自动释放
+  - 将原消息转化为新的消息并调用 ctx.fireChannelRead(newMsg) 往下传，那需要将原消息 release 掉
+  - 如果已经不再调用 ctx.fireChannelRead(msg) 传递任何消息，需要把原消息 release 掉
+- 对于出站消息：
+  - 无需用户关心
+  - 消息最终都会走到 HeadContext，flush 之后会自动释放
+
+****
+
+
+
