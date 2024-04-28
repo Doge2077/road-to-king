@@ -107,6 +107,8 @@ NIO的三大核心组件：
 
 ****
 
+在应用层面，数据从网络传递给 Buffer，我们操作 Buffer 中的数据，之后再通过 NIO 的 api 将处理后的 Buffer 中的数据写回到网络中：
+
 - Buffer是一个对象，包含一些要写入或者读出的数据
 - 原有的 IO 数据读写都是在 Stream 中，而 NIO 则是用 Buffer 预处理
 - 读数据从缓冲区读，写数据也写入到缓冲区
@@ -147,7 +149,7 @@ public Buffer flip() {
 
 ****
 
-Channe l是一个通道，管道，网络数据通过 Channel 读取和写入
+Channel是一个通道，管道，网络数据通过 Channel 读取和写入
 
 Channel 和流 Stream 的不同之处：
 
@@ -549,7 +551,7 @@ Netty 提供非阻塞的、事件驱动的网络应用程序框架和工具，�
 - JDK 中 NIO 的一些 API 功能薄弱且复杂
 - Netty 隔离了 JDK 中 NIO 的实现变化及实现细节
 - 譬如：ByteBuffer -> ByteBuf 主要负责从底层的 IO 中读取数据到 ByteBuf
-- 然后传递给应用程序，应用程序处理完之后封装为 Byte Buf，写回给 IO
+- 然后传递给应用程序，应用程序处理完之后封装为 ByteBuf，写回给 IO
 
 **简化开发**：
 
@@ -652,7 +654,7 @@ inbound 入站事件处理顺序（方向）是由链表的头到链表尾，out
 
 ****
 
-# Hello World
+# Quick Start
 
 ****
 
@@ -1200,13 +1202,15 @@ public class NettyServer {
                             //向 pipeline 中添加 handler，如果没有注册到这里则不会生效
                             pipeline.addLast(new ServerOutboundHandler1());
                             pipeline.addLast(new ServerInboundHandler1());
+                            
+                            
                             // 在这里对 serverInboundHandler2 进行复用
                             pipeline.addLast(serverInboundHandler2);
+                            
+                            
                         }
                     }); //给 worker group 配置 handler
-            //服务端绑定端口启动
             ChannelFuture future = serverBootstrap.bind(port).sync();
-            //服务端监听端口关闭
             future.channel().closeFuture().sync();
         } catch (Exception e) {
             log.error("netty server error ,{}",e.getMessage());
@@ -1390,7 +1394,7 @@ Netty 使用 ByteBuf 来替代 ByteBuffer，它是一个强大的实现，既解
 ****
 
 - 堆缓冲区(HeapByteBuf)：
-  - 内存分配在jvm堆，分配和回收速度比较快，可以被VM自动回收
+  - 内存分配在JVM堆，分配和回收速度比较快，可以被JVM自动回收
   - 缺点是：如果进行 socket 的 IO 读写，需要额外做一次内存复制，将堆内存对应的缓冲区复制到内核 Channe l中，性能会有一定程度的下降
   - 由于在堆上被 JVM管理，在不被使用时可以快速释放，可以通过ByteBuf.array() 来获取 byte[] 数据
 - 直接缓冲区(DirectByteBuf)：
@@ -1450,10 +1454,10 @@ ByteBuf 不同模式下的释放：
 - ByteBuf 如果采用的是堆缓冲区模式的话，可以由GC回收
 - 但是如果采用的是直接缓冲区，就不受GC的管理，就得手动释放，否则会发生内存泄露
 
-Netty 自身引入了引用计数，提供了 ReferenceCounted 接口，当对象的 引用计数 > 0 时要保证对象不被释放，当为 0 时需要被释放，这里分为手动释放和自动释放：
+Netty 自身引入了引用计数，提供了 ReferenceCounted 接口，当对象的引用计数 > 0 时要保证对象不被释放，当为 0 时需要被释放，这里分为手动释放和自动释放：
 
 - 手动释放：
-  - 就是在使用完成后，调用ReferenceCountUtil..release(byte Buf) 进行释放
+  - 就是在使用完成后，调用ReferenceCountUtil.release(byte Buf) 进行释放
   - 这种方式的弊端就是一旦忘记释放就可能会造成内存泄露
 - 自动释放：
   - 有三种方式，分别是入站的TailHandler(TailContext)、继承SimpleChannellnboundHandler 和 HeadHandler(HeadContext)的出站释放
@@ -1473,6 +1477,1230 @@ Netty 自身引入了引用计数，提供了 ReferenceCounted 接口，当对�
   - 消息最终都会走到 HeadContext，flush 之后会自动释放
 
 ****
+
+## Future & Promise
+
+****
+
+### Netty 的异步编程模型
+
+****
+
+对于 JDK5 的 Future 来说，在调用 Future 后想要得到任务执行的返回值必须要通过 future. get() 方法监听 future 对象中 result 字段，因此这种方式会导致线程阻塞。
+
+![image-20240427025809309](https://image.itbaima.cn/images/40/image-20240427025787659.png)
+
+对于 Netty 来说，其的异步模型为 Future/Promise 异步模型：
+
+- future和promise，目的是将值(future)与其计算方式(promise)分离，从而允许更灵活地进行计算，特别是通过并行化。
+- Future表示目标计算的返回值，Promise表示计算的方式，这个模型将返回结果和计算逻辑分离，目的是为了让计算逻辑不影响返回结果，从而抽象出一套异步编程模型。而计算逻辑与结果关联的纽带就是callback。
+- Netty中有非常多的异步调用，譬如：client/server的启动，连接，数据的读写等操作都是支持异步的。
+
+> 对于JDK8来说，新增加了一个类：CompletableFuture，它提供了非常强大的 Future 的扩展功能，最重要的是实现了回调的功能
+
+****
+
+### Netty Future
+
+****
+
+Netty 中使用了一个 ChannelFuture 来实现异步操作，其中 ChannelFuture 继承自 io.netty.util.concurrent.Future 接口：
+
+```java
+public interface Future<V> extends java.util.concurrent.Future<V> {
+  // 只有IO操作完成时才返回true
+  boolean isSuccess();
+  // 只有当cancel(boolean)成功取消时才返回true
+  boolean isCancellable();
+  // IO操作发生异常时，返回导致IO操作以此的原因，如果没有异常，返回null
+  Throwable cause();
+  // 向Future添加事件，future完成时，会执行这些事件，如果add时future已经完成，会立即执行监听事件
+  Future<V> addListener(GenericFutureListener<? extends Future<? super V>> listener);
+  Future<V> addListeners(GenericFutureListener<? extends Future<? super V>>... listeners);
+  // 移除监听事件，future完成时，不会触发
+  Future<V> removeListener(GenericFutureListener<? extends Future<? super V>> listener);
+  Future<V> removeListeners(GenericFutureListener<? extends Future<? super V>>... listeners);
+  // 等待future done
+  Future<V> sync() throws InterruptedException;
+  // 等待future done，不可打断
+  Future<V> syncUninterruptibly();
+  // 等待future完成
+  Future<V> await() throws InterruptedException;
+  // 等待future 完成，不可打断
+  Future<V> awaitUninterruptibly();
+  boolean await(long timeout, TimeUnit unit) throws InterruptedException;
+  boolean await(long timeoutMillis) throws InterruptedException;
+  boolean awaitUninterruptibly(long timeout, TimeUnit unit);
+  boolean awaitUninterruptibly(long timeoutMillis);
+  // 立刻获得结果，如果没有完成，返回null
+  V getNow();
+  // 如果成功取消，future会失败，导致CancellationException
+  @Override
+  boolean cancel(boolean mayInterruptIfRunning);
+```
+
+Netty 自己实现的 Future 继承了 JDK 的 Future，新增了 `sync()` 和`await()` 用于阻塞等待，还加了 Listeners，只要任务结束去回调 Listener 就可以了，那么我们就不一定要主动调用 `isDone() `来获取状态，或通过 `get()` 阻塞方法来获取值。
+
+Netty的 Future 与 Java 的 Future 虽然类名相同，但功能上略有不同，Netty 中引入了 Promise 机制。
+
+****
+
+### Netty Promise
+
+****
+
+Netty 的Future，只是增加了监听器。整个异步的状态，是不能进行设置和修改的，于是 Netty 的 Promise 接口扩展了 Netty 的 Future接口，可以设置异步执行的结果。在IO操作过程，如果顺利完成、或者发生异常，都可以设置Promise的结果，并且通知Promise的Listener 们，示例如下：
+
+```java
+package netty;
+
+import io.netty.channel.EventLoopGroup;
+import io.netty.channel.nio.NioEventLoopGroup;
+import io.netty.util.concurrent.DefaultPromise;
+import io.netty.util.concurrent.Future;
+import io.netty.util.concurrent.Promise;
+import org.junit.Test;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.time.LocalDateTime;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+
+public class NettyFutureTest {
+    private static final Logger log = LoggerFactory.getLogger(NettyFutureTest.class);
+
+
+    @Test
+    public void testFuture() throws InterruptedException, ExecutionException {
+        EventLoopGroup group = new NioEventLoopGroup();
+
+        Future<String> future = group.submit( () ->{
+            log.info("---异步线程执行任务开始----,time={}", LocalDateTime.now().toString());
+            try {
+                TimeUnit.SECONDS.sleep(3);
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+            log.info("---异步线程执行任务结束----,time={}", LocalDateTime.now().toString());
+            return "hello netty future";
+        });
+        /*String result = future.get();
+        log.info("----主线程阻塞等待异步线程执行结果:{}",result);*/
+        //设置监听
+        future.addListener( future1 -> {
+            log.info("---收到异步线程执行任务结果通知----执行结果是;{},time={}",future1.get(), LocalDateTime.now().toString());
+        });
+        log.info("---主线程----");
+        TimeUnit.SECONDS.sleep(10);
+    }
+
+
+    @Test
+    public void testPromise() throws InterruptedException {
+        EventLoopGroup group = new NioEventLoopGroup();
+
+        Promise promise = new DefaultPromise(group.next());//promise绑定到eventloop上
+
+        group.submit(()->{
+            log.info("---异步线程执行任务开始----,time={}", LocalDateTime.now().toString());
+            try {
+                int i = 1/0;
+                TimeUnit.SECONDS.sleep(3);
+                promise.setSuccess("hello netty promise");
+                TimeUnit.SECONDS.sleep(3);
+                log.info("---异步线程执行任务结束----,time={}", LocalDateTime.now().toString());
+                return;
+            } catch (Exception e) {
+                promise.setFailure(e);
+            }
+        });
+        //设置监听回调
+        promise.addListener(future -> {
+            log.info("----异步任务执行结果:{}",future.isSuccess());
+        });
+        promise.addListener(future2 -> {
+            log.info("----异步任务执行结果:{}",future2.isSuccess());
+        });
+        log.info("---主线程----");
+        TimeUnit.SECONDS.sleep(10);
+    }
+
+}
+```
+
+在 Java 的 Future 中，业务逻辑为一个 Callable 或 Runnable 实现类，该类的 `call() `或  `run()` 执行完毕意味着业务逻辑的完结，在 Promise 机制中，可以在业务逻辑中人工设置业务逻辑的成功与失败，这样更加方便的监控自己的业务逻辑。
+
+****
+
+# Netty 编码器
+
+****
+
+## TCP 粘包拆包
+
+****
+
+### Socket 缓冲区与滑动窗口
+
+****
+
+Netty 底层是基于 TCP 协议来处理网络数据传输，而对于 TCP 协议而言，它传输数据是**基于字节流传输**的。
+
+应用层在传输数据时：
+
+- 实际上会先将数据写入到 TCP 套接字的缓冲区，当缓冲区被写满后，数据才会被写出去。
+- 每个TCP Socket 在内核中都有一个发送缓冲区(SO_SNDBUF )和一个接收缓冲区(SO_RCVBUF)
+- TCP 的全双工的工作模式以及 TCP 的滑动窗口便是依赖于这两个独立的 buffer 以及此 buffer 的填充状态
+
+**SO_SNDBUF：**
+
+- 进程发送的数据的时候假设调用了一个 send 方法，将数据拷贝进入 Socket 的内核发送缓冲区之中，然后 send 便会在上层返回。
+- 换句话说，send 返回之时，数据不一定会发送到对端去(和write写文件有点类似)，send 仅仅是把应用层 buffer 的数据拷贝进Socket 的内核发送 buffer 中。
+
+**SO_RCVBUF：**
+
+- 把接收到的数据缓存入内核，应用进程一直没有调用 read 进行读取的话，此数据会一直缓存在相应 Socket 的接收缓冲区内。不管进程是否读取 Socket，对端发来的数据都会经由内核接收并且缓存到 Socket 的内核接收缓冲区之中。
+- read 所做的工作，就是把内核缓冲区中的数据拷贝到应用层用户的 buffer 里面，仅此而已。
+
+接收缓冲区保存收到的数据一直到应用进程读走为止。对于 TCP，如果应用进程一直没有读取，buffer 满了之后发生的动作是：通知对端 TCP 协议中的窗口关闭。这个便是滑动窗口的实现。保证 TCP 套接口接收缓冲区不会溢出，从而保证了 TCP 是可靠传输。因为对方不允许发出超过所通告窗口大小的数据。 这就是 TCP 的流量控制，如果对方无视窗口大小而发出了超过窗口大小的数据，则接收方 TCP 将丢弃它。
+
+**滑动窗口：**
+
+- TCP连接在三次握手的时候，会将自己的窗口大小(window size)发送给对方，其实就是 SO_RCVBUF 指定的值。之后在发送数据的时，发送方必须要先确认接收方的窗口没有被填充满，如果没有填满，则可以发送。
+- 每次发送数据后，发送方将自己维护的对方的 window size 减小，表示对方的 SO_RCVBUF 可用空间变小。
+- 当接收方处理开始处理 SO_RCVBUF 中的数据时，会将数据从 Socket 在内核中的接受缓冲区读出，此时接收方的 SO_RCVBUF 可用空间变大，即 window size 变大，接受方会以 ack 消息的方式将自己最新的 window size 返回给发送方，此时发送方将自己的维护的接受的方的 window size 设置为ack消息返回的 window size。
+- 此外，发送方可以连续的给接受方发送消息，只要保证对方的 SO_RCVBUF 空间可以缓存数据即可，即 window size>0。当接收方的 SO_RCVBUF 被填充满时，此时 window size=0，发送方不能再继续发送数据，要等待接收方 ack 消息，以获得最新可用的 window size。
+
+****
+
+### MSS/MTU分片
+
+****
+
+MTU (Maxitum Transmission Unit,最大传输单元)是链路层对一次可以发送的最大数据的限制。MSS(Maxitum Segment Size,最大分段大小)是 TCP 报文中 data 部分的最大长度，是传输层对一次可以发送的最大数据的限制。
+
+数据在传输过程中，每经过一层，都会加上一些额外的信息：
+
+- 应用层：只关心发送的数据 data，将数据写入 Socket 在内核中的缓冲区 SO_SNDBUF 即返回，操作系统会将 SO_SNDBUF 中的数据取出来进行发送；
+- 传输层：会在 data 前面加上 TCP Header(20字节)；
+- 网络层：会在 TCP 报文的基础上再添加一个 IP Header，也就是将自己的网络地址加入到报文中。IPv4 中 IP Header 长度是 20 字节，IPV6 中 IP Header 长度是 40 字节；
+- 链路层：加上 Datalink Header 和 CRC。会将 SMAC(Source Machine，数据发送方的MAC地址)，DMAC(Destination Machine，数据接受方的MAC地址 )和 Type 域加入。SMAC+DMAC+Type+CRC 总长度为 18 字节；
+- 物理层：进行传输
+
+MTU 是以太网传输数据方面的限制，每个以太网帧最大不能超过 1518bytes。刨去以太网帧的帧头(DMAC+SMAC+Type域) 14Bytes 和帧尾 (CRC校验 ) 4 Bytes，那么剩下承载上层协议的地方也就是 data 域最大就只能有 1500 Bytes 这个值 我们就把它称之为 MTU。
+
+因此，对于过大的数据传输，TCP 必须对其进行拆包。
+
+****
+
+### Nagle 算法
+
+****
+
+TCP/IP 协议中，无论发送多少数据，总是要在数据(data)前面加上协议头(TCP Header+IP Header)，同时，对方接收到数据，也需要发送 ACK 表示确认。
+
+为了尽可能的利用网络带宽，TCP 总是希望尽可能的发送足够大的数据。(一个连接会设置 MSS 参数，因此，TCP/IP 希望每次都能够以 MSS 尺寸的数据块来发送数据)。Nagle 算法就是为了尽可能发送大块数据，避免网络中充斥着许多小数据块。
+
+Nagle 算法的基本定义是任意时刻，最多只能有一个未被确认的小段。 所谓 “小段”，指的是小于 MSS 尺寸的数据块；所谓“未被确认”，是指一个数据块发送出去后，没有收到对方发送的 ACK 确认该数据已收到。
+
+Nagle 算法的规则：
+
+1. 如果 SO_SNDBUF 中的数据长度达到 MSS，则允许发送；
+2. 如果该 SO_SNDBUF 中含有 FIN，表示请求关闭连接，则先将 SO_SNDBUF 中的剩余数据发送，再关闭；
+3. 设置了 `TCP_NODELAY=true` 选项，则允许发送。TCP_NODELAY 是取消 TCP 的确认延迟机制，相当于禁用了 Negale 算法。正常情况下，当 Server 端收到数据之后，它并不会马上向 client 端发送 ACK，而是会将 ACK 的发送延迟一段时间(一般是 40ms)，它希望在 t 时间内 server 端会向 client 端发送应答数据，这样 ACK 就能够和应答数据一起发送，就像是应答数据捎带着 ACK 过去。当然，TCP 确认延迟 40ms 并不是一直不变的， TCP 连接的延迟确认时间一般初始化为最小值 40ms，随后根据连接的重传超时时间(RTO)、上次收到数据包与本次接收数据包的时间间隔等参数进行不断调整。另外可以通过设置 TCP_QUICKACK 选项来取消确认延迟；
+4. 未设置 TCP_CORK 选项时，若所有发出去的小数据包(包长度小于MSS)均被确认，则允许发送；
+5. 上述条件都未满足，但发生了超时(一般为200ms)，则立即发送。
+
+因此，综合分析来看，TCP 层肯定是会出现当次接收到的数据是不完整数据的情况。
+
+****
+
+### 总结
+
+****
+
+出现粘包可能的原因有：
+
+- 发送方每次写入数据 < 套接字缓冲区大小；
+- 接收方读取套接字缓冲区数据不够及时。
+
+出现半包的可能原因有：
+
+- 发送方每次写入数据 > 套接字缓冲区大小；
+- 发送的数据大于协议 MTU，所以必须要拆包。
+
+解决问题肯定不是在4层来做而是在应用层，通过定义通信协议来解决粘包和拆包的问题。发送方 和 接收方约定某个规则：
+
+- 当发生粘包的时候通过某种约定来拆包；
+- 如果在拆包，通过某种约定来将数据组成一个完整的包处理。
+
+由此可知：发生这种现象的根本原因是因为，TCP协议是面向连接的、可靠的、基于字节流的传输层通信协议，是一种流式协议，消息无边界。
+
+****
+
+## 解决方案
+
+****
+
+![image-20240427043146791](https://image.itbaima.cn/images/40/image-20240427041082376.png)
+
+经过上述分析，解决TCP粘包，半包问题的根本在于找出消息的边界：
+
+- 短链接：
+  - 每个请求都是一次连接的过程
+  - 防止多个报文合并发送，一个连接只发送一条报文
+
+- 定长协议
+  - 报文的长度是固定值
+  - 如果不补齐空格，那么就会读到下一个报文的字节来填充上一个报文直到补齐为止，这样粘包了
+- 特殊字符分割协议：
+  - 包的尾部添加指定的特殊字符，比如：\n，\r等等。
+  - 需要注意的是：约定的特殊字符要保证唯一性，不能出现在报文的正文中，否则就将正文一分为二了。
+
+- 变长协议：
+  - 将消息分为消息头和消息体，消息头中标识当前完整的消息体长度。
+  - 发送方在发送数据之前先获取数据的二进制字节大小，然后在消息体前面添加消息大小；
+  - 接收方在解析消息时先获取消息大小，之后必须读到该大小的字节数才认为是完整的消息。
+
+****
+
+## Netty 消息编码器
+
+****
+
+Netty 提供了针对封装成帧这种形式下不同方式的拆包器。
+
+所谓的拆包其实就是数据的解码，所谓解码就是将网络中的一些原始数据解码成上层应用的数据，那对应在发送数据的时候要按照同样的方式进行数据的编码操作然后发送到网络中。
+
+![image-20240427045113500](https://image.itbaima.cn/images/40/image-2024042704613814.png)
+
+**以下针对 Netty 的编码器示例完整代码**：[learn-netty-demo](https://github.com/Doge2077/learn-netty/tree/main/learn-netty-demo)
+
+****
+
+### FixedLengthFrameDecoder
+
+****
+
+```java
+public class ServerChannelInitializer extends ChannelInitializer<SocketChannel> {
+    @Override
+    protected void initChannel(SocketChannel socketChannel) throws Exception {
+        ChannelPipeline pipeline = socketChannel.pipeline();
+        pipeline.addLast(new FixedLengthFrameDecoder(10));
+        pipeline.addLast("decoder", new StringDecoder());
+        pipeline.addLast("encoder", new StringEncoder());
+        // 自己的逻辑Handler
+        pipeline.addLast("handler", new PeServerHandler());
+    }
+}
+```
+
+```java
+public class ClientChannelInitializer extends ChannelInitializer<SocketChannel> {
+
+    @Override
+    protected void initChannel(SocketChannel socketChannel) throws Exception {
+        ChannelPipeline pipeline = socketChannel.pipeline();
+        pipeline.addLast(new FixedLengthFrameDecoder(10));
+        pipeline.addLast("decoder", new StringDecoder());
+        pipeline.addLast("encoder", new StringEncoder());
+        // 客户端的逻辑
+        pipeline.addLast("handler", new PeClientHandler());
+    }
+}
+```
+
+****
+
+### LineBasedFrameDecoder
+
+****
+
+```java
+public class ServerChannelInitializer extends ChannelInitializer<SocketChannel> {
+    @Override
+    protected void initChannel(SocketChannel socketChannel) throws Exception {
+        ChannelPipeline pipeline = socketChannel.pipeline();
+        pipeline.addLast(new LineBasedFrameDecoder(2048));
+        pipeline.addLast("decoder", new StringDecoder());
+        pipeline.addLast("encoder", new StringEncoder());
+        // 自己的逻辑Handler
+        pipeline.addLast("handler", new PeServerHandler());
+    }
+}
+```
+
+```java
+public class ClientChannelInitializer extends  ChannelInitializer<SocketChannel> {
+
+    @Override
+    protected void initChannel(SocketChannel socketChannel) throws Exception {
+        ChannelPipeline pipeline = socketChannel.pipeline();
+        pipeline.addLast(new LineBasedFrameDecoder(2048));
+        pipeline.addLast("decoder", new StringDecoder());
+        pipeline.addLast("encoder", new StringEncoder());
+        // 客户端的逻辑
+        pipeline.addLast("handler", new PeClientHandler());
+    }
+}
+```
+
+****
+
+### LengthFieldBasedFrameDecoder
+
+****
+
+```java
+public class ServerChannelInitializer extends ChannelInitializer<SocketChannel> {
+    @Override
+    protected void initChannel(SocketChannel socketChannel) throws Exception {
+        ChannelPipeline pipeline = socketChannel.pipeline();
+        pipeline.addLast(new LengthFieldBasedFrameDecoder(1024, // 帧的最大长度，即每个数据包最大限度
+                0, // 长度字段偏移量
+                4, // 长度字段所占的字节数
+                0, // 消息头的长度，可以为负数
+                4) // 需要忽略的字节数，从消息头开始，这里是指整个包
+
+        );
+//        pipeline.addLast("decoder", new StringDecoder());
+        //pipeline.addLast("encoder", new StringEncoder());
+        // 自己的逻辑Handler
+        pipeline.addLast("handler", new PeServerHandler());
+    }
+}
+```
+
+```java
+public class ClientChannelInitializer extends ChannelInitializer<SocketChannel> {
+
+    @Override
+    protected void initChannel(SocketChannel socketChannel) throws Exception {
+        ChannelPipeline pipeline = socketChannel.pipeline();
+        pipeline.addLast(new LineBasedFrameDecoder(10));
+//        pipeline.addLast("decoder", new StringDecoder());
+//        pipeline.addLast("encoder", new StringEncoder());
+        // 客户端的逻辑
+        pipeline.addLast("handler", new PeClientHandler());
+    }
+}
+```
+
+****
+
+### 自定义编码器
+
+****
+
+```java
+public class ServerChannelInitializer extends ChannelInitializer<SocketChannel> {
+    @Override
+    protected void initChannel(SocketChannel socketChannel) throws Exception {
+        ChannelPipeline pipeline = socketChannel.pipeline();
+        pipeline.addLast(new MyProtocolEncoder());
+
+        /**
+         *
+         * MsgReq 对象 ：
+         * byte type 字段占一个字节
+         * int length 字段 占4个字节
+         * 剩下的是消息体
+         * 那么 这里的 参数设置：
+         *
+         * int maxFrameLength：可以设置你认为的小题最大上限
+         * int lengthFieldOffset：长度字段从哪个位置开始读：第0个字节是type，长度是从1开始的
+         * int lengthFieldLength：长度字段所占的字节数，int类型占4个字节
+         * int lengthAdjustment：是否需要调整消息头的长度，即读取消息头是否需要偏移一下，我们这里不需要
+         * int initialBytesToStrip：消息体是否需要忽略一些字节数，比如忽略消息头的长度，我们这里消息头也算在对象里面了所以不忽略
+         * boolean failFast：如果读取长度不够是否快速失败
+         *
+         */
+        pipeline.addLast(new MyProtocolDecoder(1024, // 帧的最大长度，即每个数据包最大限度
+                1, // 长度字段偏移量
+                4, // 长度字段所占的字节数
+                0, // 消息头的长度，可以为负数
+                0, // 需要忽略的字节数，从消息头开始，这里是指整个包
+                true)
+
+        );
+        // 自己的逻辑Handler
+        pipeline.addLast("handler", new PeServerHandler());
+    }
+}
+```
+
+```java
+public class ClientChannelInitializer extends ChannelInitializer<SocketChannel> {
+
+    @Override
+    protected void initChannel(SocketChannel socketChannel) throws Exception {
+        ChannelPipeline pipeline = socketChannel.pipeline();
+        pipeline.addLast(new MyProtocolEncoder());
+        /**
+         *
+         * MsgReq 对象 ：
+         * byte type 字段占一个字节
+         * int length 字段 占4个字节
+         * 剩下的是消息体
+         * 那么 这里的 参数设置：
+         *
+         * int maxFrameLength：可以设置你认为的小题最大上限
+         * int lengthFieldOffset：长度字段从哪个位置开始读：第0个字节是type，长度是从1开始的
+         * int lengthFieldLength：长度字段所占的字节数，int类型占4个字节
+         * int lengthAdjustment：是否需要调整消息头的长度，即读取消息头是否需要偏移一下，我们这里不需要
+         * int initialBytesToStrip：消息体是否需要忽略一些字节数，比如忽略消息头的长度，我们这里消息头也算在对象里面了所以不忽略
+         * boolean failFast：如果读取长度不够是否快速失败
+         *
+         */
+        pipeline.addLast(new MyProtocolDecoder(1024,
+                1,
+                4,
+                0,
+                0,
+                true));
+        // 客户端的逻辑
+        pipeline.addLast("handler", new PeClientHandler());
+    }
+}
+```
+
+****
+
+## 二次编解码
+
+****
+
+我们把解决半包粘包问题的常用三种解码器叫一次解码器。
+
+其作用是将原始数据流（可能会出现粘包和半包的数据流）转换为用户数据(ByteBuf中存储)，但仍然是字节数据。
+
+因此我们需要二次解码器将字节数组转换为java对象，或者将一种格式转化为另一种格式，方便上层应用程序使用。
+
+一次解码器继承自：`ByteToMessageDecoder`
+
+二次解码器继承自：`MessageToMessageDecoder`
+
+但他们的本质都是继承： `ChannellnboundHandlerAdapter`
+
+用户数据（ByteBuf）Java Object之间的转换，或者将将一种格式转化为另一种格式（譬如将应用数据转化成某种
+协议数据)。
+
+- Java序列化：不推荐使用，占用空间大，也只有java语言能用
+- Marshaling：比java序列化稍好
+- XML：可读性好，但是占用空间大
+- JSON：可读性也好，空间较小
+- MessagePack：占用空间比SON小，可读性不如SON,但也还行
+- Protobuf：性能高，体积小，但是可读性差
+- hessian：跨语言、高效的二进制序列化协议，整体性能和protobuf:差不多。
+- 其他
+
+****
+
+## Http 编解码
+
+****
+
+```java
+protected void initChannel(SocketChannel ch) throws Exception {
+    //获取与该channel绑定的pipeline
+    ChannelPipeline pipeline = ch.pipeline();
+
+    //测试 http service
+    pipeline.addLast(new HttpResponseEncoder());
+
+    pipeline.addLast(new HttpRequestDecoder());
+    //文件上传需要设置大点儿 单位是字节
+    pipeline.addLast(new HttpObjectAggregator(1024*1024*8));
+    pipeline.addLast(new MyHttpServerHandler());
+}
+```
+
+```java
+public class MyHttpServerHandler extends SimpleChannelInboundHandler<FullHttpRequest> {
+    private static final Logger log = LoggerFactory.getLogger(MyHttpServerHandler.class);
+
+    private static final HttpDataFactory HTTP_DATA_FACTORY = new DefaultHttpDataFactory(DefaultHttpDataFactory.MAXSIZE);
+
+    static {
+        DiskFileUpload.baseDirectory = "/opt/netty/fileupload";
+    }
+
+    @Override
+    protected void channelRead0(ChannelHandlerContext ctx, FullHttpRequest fullHttpRequest) throws Exception {
+        //HttpRequest request = fullHttpRequest;
+        //String uri = fullHttpRequest.uri(); 
+        //获取method
+        HttpMethod method = fullHttpRequest.method();
+        //根据method解析参数，封装数据，
+        if (HttpMethod.GET.equals(method)) {
+           parseGet(fullHttpRequest);
+        }else if (HttpMethod.POST.equals(method)) {
+            parsePost(fullHttpRequest);
+        }else {
+            log.error("{} method is not supported ,please change http method for get or post!");
+        }
+        //service
+        //response client
+        StringBuilder sb = new StringBuilder();
+        sb.append("<html>");
+        sb.append("<head>");
+        sb.append("</head>");
+        sb.append("<body>");
+        sb.append("<h3>success</h3>");
+        sb.append("</body>");
+        sb.append("</html>");
+        writeResponse(ctx,fullHttpRequest,HttpResponseStatus.OK,sb.toString());
+    }
+
+    private void writeResponse(ChannelHandlerContext ctx, FullHttpRequest fullHttpRequest, HttpResponseStatus status, String msg) {
+        FullHttpResponse response = new DefaultFullHttpResponse(HttpVersion.HTTP_1_1,status);
+        response.content().writeBytes(msg.getBytes(StandardCharsets.UTF_8));
+        response.headers().set(HttpHeaderNames.CONTENT_TYPE,"text/html;charset=utf-8");
+        HttpUtil.setContentLength(response,response.content().readableBytes());
+        boolean keepAlive = HttpUtil.isKeepAlive(fullHttpRequest);
+        if (keepAlive) {
+            response.headers().set(HttpHeaderNames.CONNECTION,"keep-alive");
+            ctx.writeAndFlush(response);
+        }else {
+            ctx.writeAndFlush(response).addListener(ChannelFutureListener.CLOSE);
+        }
+    }
+
+    private void parsePost(FullHttpRequest fullHttpRequest) {
+        //获取content-type
+        String contentType = getContentType(fullHttpRequest);
+        switch (contentType) {
+            case "application/json":
+                parseJson(fullHttpRequest.content());
+                break;
+            case "application/x-www-form-urlencoded":
+                parseForm(fullHttpRequest);
+                break;
+            case "multipart/form-data":
+                parseMultipart(fullHttpRequest);
+                break;
+            default:
+        }
+
+    }
+
+    private void parseMultipart(FullHttpRequest fullHttpRequest) {
+        HttpPostRequestDecoder postRequestDecoder = new HttpPostRequestDecoder(HTTP_DATA_FACTORY,fullHttpRequest);
+        //判断是否是multipart
+        if (postRequestDecoder.isMultipart()) {
+        //获取 body中的数据
+        List<InterfaceHttpData> bodyHttpDatas = postRequestDecoder.getBodyHttpDatas();
+        bodyHttpDatas.forEach(dataItem ->{
+            //获取数据项的类型
+            InterfaceHttpData.HttpDataType dataType = dataItem.getHttpDataType();
+            //判断是普通表达项还是文件上传项
+            if (dataType.equals(InterfaceHttpData.HttpDataType.Attribute)) {
+                //普通表单项 直接获取数据
+                Attribute attribute = (Attribute) dataItem;
+                try {
+                    log.info("表单项名称:{},表单项值:{}",attribute.getName(),attribute.getValue());
+                } catch (IOException e) {
+                    log.error("获取表单项数据错误,msg={}",e.getMessage());
+                }
+
+            }else if (dataType.equals(InterfaceHttpData.HttpDataType.FileUpload)) {
+                //文件上传项 处理待上传的数据
+                FileUpload fileUpload = (FileUpload) dataItem;
+                //获取原始文件名称
+                String filename = fileUpload.getFilename();
+                //获取表单name属性
+                String name = fileUpload.getName();
+                log.info("文件名称:{},表单项名称:{}",filename,name);
+                //将文件数据保存到磁盘
+                if (fileUpload.isCompleted()) {
+                    try {
+                        String path = DiskFileUpload.baseDirectory + File.separator + filename;
+                        //File file = fileUpload.getFile();
+                        fileUpload.renameTo(new File(path));
+                    } catch (IOException e) {
+                        log.error("文件转存失败,msg={}",e.getMessage());
+                    }
+                }
+            }else {
+
+            }
+        });
+        }
+    }
+
+    private void parseForm(FullHttpRequest fullHttpRequest) {
+        //post请求时uri中也可能携带参数
+        parseKVstr(fullHttpRequest.uri(),true);
+        //解析请求体中的表单数据
+        parseFormData(fullHttpRequest.content());
+    }
+
+    private void parseFormData(ByteBuf body) {
+        String bodystr = body.toString(StandardCharsets.UTF_8);
+        parseKVstr(bodystr,false);
+    }
+
+    private void parseJson(ByteBuf jsonbody) {
+        String jsonstr = jsonbody.toString(StandardCharsets.UTF_8);
+        //使用json工具反序列化
+        JSONObject jsonObject = JSONObject.parseObject(jsonstr);
+        //打印 json数据
+        jsonObject.entrySet().stream().forEach(entry ->{
+            log.info("json key={},json value={}",entry.getKey(),entry.getValue());
+        });
+    }
+
+    private String getContentType(FullHttpRequest request) {
+        HttpHeaders headers = request.headers();
+        String contentType = headers.get(HttpHeaderNames.CONTENT_TYPE);// text/plain;charset=UTF-8
+        //List<String> acceptEncoding = headers.getAll(HttpHeaderNames.ACCEPT_ENCODING);//accept-encoding:gzip, deflate, br
+        return contentType.split(";")[0];
+    }
+
+    private void parseGet(FullHttpRequest request) {
+        //通过uri解析请求参数
+        parseKVstr(request.uri(),true);
+    }
+
+    private void parseKVstr(String str,boolean hasPath) {
+        //通过QueryStringDecoder解析kv字符串
+        QueryStringDecoder qsd = new QueryStringDecoder(str, StandardCharsets.UTF_8,hasPath);////get请求的uri是: path?k=v
+        Map<String, List<String>> parameters = qsd.parameters();
+        //封装参数，执行业务 此处打印即可
+        if (parameters!=null && parameters.size() > 0) {
+            parameters.entrySet().stream().forEach(entry->{
+                log.info("参数名:{},参数值:{}",entry.getKey(),entry.getValue());
+            });
+        }
+    }
+
+
+    @Override
+    public void channelReadComplete(ChannelHandlerContext ctx) throws Exception {
+        //ctx.flush();
+    }
+
+    @Override
+    public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
+        log.error("MyHttpServerHandler Exception,{}",cause.getMessage());
+    }
+}
+```
+
+```html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>测试 netty http server</title>
+</head>
+<body>
+    <form action="http://localhost:8888/test" method="post" enctype="multipart/form-data">
+        <label for="username">用户名:</label><input id="username" type="text" name="username"><br/>
+        <label for="password">密码:</label><input id="password" type="password" name="password"><br/>
+        <label for="email">邮箱:</label><input id="email" type="email" name="email"><br/>
+        <label for="address">地址:</label><input id="address" type="text" name="address"><br/>
+        <label for="pic">选择文件:</label><input id="pic" type="file" name="pic"><br/>
+
+        <input type="submit" value="提交">
+    </form>
+</body>
+</html>
+```
+
+****
+
+## websocke 编解码
+
+****
+
+```java
+.childHandler(new ChannelInitializer<SocketChannel>() {
+    //每个客户端channel初始化时都会执行该方法来配置该channel的相关handler
+    @Override
+    protected void initChannel(SocketChannel ch) throws Exception {
+        //获取与该channel绑定的pipeline
+        ChannelPipeline pipeline = ch.pipeline();
+        //基于netty开发websocket 服务端
+        pipeline.addLast(new HttpServerCodec());//HttpServerCodec = HttpRequestDecoder + HttpResponseEncoder
+        pipeline.addLast(new HttpObjectAggregator(1024*1024*8));
+        //pipeline.addLast(new ChunkedWriteHandler());
+        //添加业务处理器
+        pipeline.addLast(new MyWebSocketServerHandler());
+
+    }
+});
+```
+
+```java
+public class MyWebSocketServerHandler extends SimpleChannelInboundHandler<Object> {
+
+    private static final Logger log = LoggerFactory.getLogger(MyWebSocketServerHandler.class);
+    
+    private WebSocketServerHandshaker serverHandshaker;
+
+
+    
+    @Override
+    protected void channelRead0(ChannelHandlerContext ctx, Object msg) throws Exception {
+        //判断是http握手请求还是websocket请求
+        if (msg instanceof FullHttpRequest) {
+            boolean handShaker = handleHttpRequest(ctx, (FullHttpRequest) msg);
+            if (handShaker) {
+                //握手成功后 服务端主动推送消息，每隔5s推送一次
+                new Thread(()->{
+                    while (true) {
+                        try {
+                            ctx.channel().writeAndFlush(new TextWebSocketFrame("你好,这是服务器主动推送回来的数据,当前时间为:"+new Date().toString()));
+                            TimeUnit.SECONDS.sleep(5);
+                        } catch (InterruptedException e) {
+                            log.error("push msg exception ,{}",e.getMessage());
+                        }
+                    }
+                }).start();
+            }
+        }else if (msg instanceof WebSocketFrame) {
+            handleWebSocketFrame(ctx,(WebSocketFrame)msg);
+        }
+    }
+    
+    /**
+     * 接收到的消息是已经解码的WebSocketFrame消息
+     * @param ctx
+     * @param frame
+     */
+    private void handleWebSocketFrame(ChannelHandlerContext ctx, WebSocketFrame frame) {
+        // 判断链路消息类型
+        if (frame instanceof CloseWebSocketFrame) { // 关闭链路指令
+            serverHandshaker.close(ctx.channel(),((CloseWebSocketFrame) frame).retain());
+            return;
+        }
+        if (frame instanceof PingWebSocketFrame) { // 维持链路的ping 指令
+            ctx.channel().writeAndFlush(new PongWebSocketFrame(frame.content().retain()));
+            return;
+        }
+        if (frame instanceof TextWebSocketFrame) { // 普通文本消息
+            TextWebSocketFrame textFrame = (TextWebSocketFrame) frame;
+            String message = textFrame.text();
+            log.info("receive text msg is {}",message);
+            //构造返回
+            ctx.channel().writeAndFlush(new TextWebSocketFrame("你好,欢迎使用netty websocket 服务,当前时间为:"+new Date().toString()));
+            return;
+        }
+        if (frame instanceof BinaryWebSocketFrame) { //二进制消息
+            log.info("frame is binarywebsocketframe");
+        }
+
+    }
+    
+    private boolean handleHttpRequest(ChannelHandlerContext ctx, FullHttpRequest fullHttpRequest) {
+        //先判断是否解码成功，
+        if (!fullHttpRequest.decoderResult().isSuccess()) {
+            sendHttpResponse(ctx,fullHttpRequest,new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.BAD_REQUEST));
+            return false;
+        }
+        // 然后判断是否要建立websocket连接
+        //构造握手工厂 创建握手处理类，并且构造握手响应给客户端
+        WebSocketServerHandshakerFactory serverHandshakerFactory = new WebSocketServerHandshakerFactory("ws://localhost:8888/mywebsocket",null,false);
+        if (!fullHttpRequest.headers().contains(HttpHeaderNames.UPGRADE,"websocket",true)) {
+            WebSocketServerHandshakerFactory.sendUnsupportedVersionResponse(ctx.channel());
+            return false;
+        }
+        serverHandshaker = serverHandshakerFactory.newHandshaker(fullHttpRequest);
+        serverHandshaker.handshake(ctx.channel(),fullHttpRequest);
+        return true;
+    }
+    
+    private void sendHttpResponse(ChannelHandlerContext ctx, FullHttpRequest request, FullHttpResponse response) {
+        if (!response.status().equals(HttpResponseStatus.OK)) {
+            ByteBuf byteBuf = Unpooled.wrappedBuffer("error".getBytes(StandardCharsets.UTF_8));
+            response.content().writeBytes(byteBuf);
+            byteBuf.release();
+            HttpUtil.setContentLength(response,response.content().readableBytes());
+        }
+        ChannelFuture future = ctx.channel().writeAndFlush(response);
+        if (!HttpUtil.isKeepAlive(request) || !response.status().equals(HttpResponseStatus.OK) ) {
+            future.addListener(ChannelFutureListener.CLOSE);
+        }
+
+    }
+
+
+    @Override
+    public void channelReadComplete(ChannelHandlerContext ctx) throws Exception {
+        ctx.flush();
+    }
+
+    @Override
+    public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
+        log.error("server error,msg is {}",cause.getMessage());
+        ctx.close();
+    }
+}
+```
+
+```html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>test netty websocket </title>
+</head>
+<body>
+<br>
+<script type="text/javascript">
+    var socket;
+    if(!window.WebSocket){
+        window.WebSocket=window.MozWebSocket;
+    }
+    if(window.WebSocket){
+        socket=new WebSocket("ws://localhost:8888/mywebSocket");
+        socket.onmessage=function(event){
+            var ta=document.getElementById('responseText');
+            ta.value="";
+            ta.value=event.data;
+        };
+        socket.onopen=function(event){
+            var ta=document.getElementById('responseText');
+            ta.value='打开WebSocket服务器正常，浏览器支持WebSocket！';
+        };
+        socket.onclose=function(event){
+            var ta=document.getElementById('responseText');
+            ta.value='';
+            ta.value="WebSocket 关闭！";
+        };
+    }else{
+        alert("抱歉，您的浏览器不支持WebSocket协议！");
+    }
+    function send(message){
+        if(!window.WebSocket){
+            return;
+        }
+        if(socket!=null){
+            socket.send(message);
+        }else{
+            alert("WebSocket连接没有建立成功，请刷新页面！");
+        }
+        /* if(socket.readyState==WebSocket.open){
+            socket.send(message);
+        }else{
+            alert("WebSocket连接没有建立成功！");
+        } */
+    }
+</script>
+<form onsubmit="return false;">
+    <input type="text" name="message" value="Netty WebSocket实战"/>
+    <br><br>
+    <input type="button" value="发送WebSocket请求消息" onclick="send(this.form.message.value)"/>
+    <hr color="blue"/>
+    <h3>服务端返回的应答消息</h3>
+    <textarea id="responseText" style="width:500px;height:300px;"></textarea>
+</form>
+</body>
+</html>
+```
+
+****
+
+# keepavlie 与 idle 监测
+
+****
+
+![image-20240427054847605](https://image.itbaima.cn/images/40/image-2024042705824315.png)
+
+****
+
+## TCP Keepalvie
+
+****
+
+主要由如下三个参数：
+
+- net.ipv4.tcp_keepalive_time 7200
+- net.ipv4.tcp_keepalive_intvl 75
+- net.ipv4.tcp_keepalive_probes =9
+
+当启用（默认关闭）keepalive时：
+
+- TCP在连接没有数据通过的7200秒后发送keepalive探测消息
+- 当探测没有确认时，按75秒的重试频率重发
+- 一直发9个探测包都没有确认，就认定连接失效
+
+所以总耗时一般为：2小时11分钟(7200秒+75秒*9次
+
+****
+
+## 应用层 Keepalive
+
+****
+
+### 应用心跳
+
+****
+
+除了在tcp网络层开启 keepalive 之外，我们普遍还需要在应用层启动 keepalive，一般称之为：应用心跳（心跳机制）
+
+原因如下：
+
+- 协议分层，各层关注点不同，网络传输层关注网络是否可达，应用层关注是否能正常提供服务
+- tcp的 keepalive 默认关闭，并且经过路由等中转设备后 keepalive 包有可能被丢弃
+- tcp层的 keepalive 时间太长，默认 > 2小时，虽然可改，但是属于系统参数一旦改动影响该机器上的所有应用
+
+另外需要注意：http虽然属于应用层协议，因此会经常听到HTTP的头信息：Connection:Keep-Alive,HTTP/1.1默认使 Connection:keep-alive 进行长连接。
+
+在一次TCP连接中可以完成多个HTTP请求，但是对每个请求仍然要单独发header,Keep-Alive不会永久保持连接，它有一个保持时间，可以在不同的服务器软件（如Apache）中设定这个时间。
+
+这种长连接是一种“伪链接”，而且只能由客户端发送请求，服务端响应。HTTP协议的长连接和短连接，实质上是TCP协议的长连接和短连接。
+
+****
+
+### idle 监测
+
+****
+
+ldle监测，只是负责诊断，诊断后，做出不同的行为，决定Idle监测的最终用途，一般用来配合keepalive，减少 keepalive 消息：
+
+- 定时 keepalive 消息，keepalive消息与服务器正常消息交换完全不关联，定时就发送；
+- 空闲监测 + 判定为 ldle 时才发 keepalive，有其他数据传输的时候，不发送keepalive，无数据传输超过一定时间，判定为 ldle，再发keepalive
+
+这样的机制优点在于：
+
+- 能够快速释放损坏的、恶意的、很久不用的连接，让系统时刻保持最好的状态
+- 实际应用中：两种方式结合起来使用，按需 keepalive，保证不会空闲，如果空闲，关闭连接
+
+****
+
+### keepavlie + idle 案例
+
+****
+
+首先，将`NettyClient`和`NettyServer`拷贝一份得到`NettyClientV2`和`NettyServerV2`，其次初始化服务端和客户端的`pipeline`
+
+```java
+//Server端
+protected void initChannel(SocketChannel ch) throws Exception {
+    //获取与该channel绑定的pipeline
+    ChannelPipeline pipeline = ch.pipeline();
+    pipeline.addLast(new LoggingHandler(LogLevel.INFO));
+    pipeline.addLast(new LengthFieldPrepender(2));
+    pipeline.addLast(new StringEncoder());
+    pipeline.addLast(new LengthFieldBasedFrameDecoder(1024,0,2,0,2));
+    pipeline.addLast(new StringDecoder());
+}
+```
+
+```java
+//Client端
+protected void initChannel(SocketChannel ch) throws Exception {
+    ChannelPipeline pipeline = ch.pipeline();
+    pipeline.addLast(new LoggingHandler(LogLevel.INFO));
+    pipeline.addLast(new LengthFieldPrepender(2));
+    pipeline.addLast(new StringEncoder());
+    pipeline.addLast(new LengthFieldBasedFrameDecoder(1024,0,2,0,2));
+    pipeline.addLast(new StringDecoder());
+}
+```
+
+服务端编写用于idle监测的handler
+
+```java
+@Slf4j
+public class ServerReadIdleCheckHandler extends IdleStateHandler {
+
+    public ServerReadIdleCheckHandler() {
+        super(10, 0, 0, TimeUnit.SECONDS);
+    }
+
+    @Override
+    protected void channelIdle(ChannelHandlerContext ctx, IdleStateEvent evt) throws Exception {
+        log.info("server channel idle----");
+        if (evt == IdleStateEvent.FIRST_READER_IDLE_STATE_EVENT) {
+            ctx.close();
+            log.info("server read idle , close channel.....");
+            return;
+        }
+        super.channelIdle(ctx, evt);
+    }
+}
+```
+
+服务端添加 `ServerIdleCheckHandler`到 `pipeline` 中
+
+```java
+protected void initChannel(SocketChannel ch) throws Exception {
+    //获取与该channel绑定的pipeline
+    ChannelPipeline pipeline = ch.pipeline();
+    pipeline.addLast(new LoggingHandler(LogLevel.INFO));
+    pipeline.addLast(new ServerReadIdleCheckHandler());//添加ServerReadIdleCheckHandler
+    pipeline.addLast(new LengthFieldPrepender(2));
+    pipeline.addLast(new StringEncoder());
+    pipeline.addLast(new LengthFieldBasedFrameDecoder(1024,0,2,0,2));
+    pipeline.addLast(new StringDecoder());
+}
+```
+
+客户端完成，5s的 write 监测，超过5s不发送数据，就发送一个 keepalive 消息，避免被服务端断掉连接，故，编写客户端的 	idlehandler
+
+```java
+@Slf4j
+public class ClientWriteCheckIdleHandler extends IdleStateHandler {
+    public ClientWriteCheckIdleHandler() {
+        super(0, 5, 0, TimeUnit.SECONDS);
+    }
+    
+    //也可在channelIdle方法中直接处理
+}
+```
+
+```java
+@Slf4j
+@ChannelHandler.Sharable
+public class KeepaliveHandler extends ChannelDuplexHandler {
+
+    @Override
+    public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception {
+        if (evt == IdleStateEvent.FIRST_WRITER_IDLE_STATE_EVENT) {
+            log.info("client write idle,so send keepalive msg to server");
+            ctx.writeAndFlush("this is keepalive msg");
+        }
+
+        super.userEventTriggered(ctx, evt);
+    }
+}
+```
+
+客户端向 pipeline 中添加 handler
+
+```java
+protected void initChannel(SocketChannel ch) throws Exception {
+    ChannelPipeline pipeline = ch.pipeline();
+    pipeline.addLast(new LoggingHandler(LogLevel.INFO));
+    pipeline.addLast(new ClientWriteCheckIdleHandler());//write idle监测
+    pipeline.addLast(new LengthFieldPrepender(2));
+    pipeline.addLast(new StringEncoder());
+
+    pipeline.addLast(new KeepaliveHandler());//发送keepalvie消息
+    pipeline.addLast(new LengthFieldBasedFrameDecoder(1024,0,2,0,2));
+    pipeline.addLast(new StringDecoder());
+}
+```
+
+****
+
+# Netty 性能优化
+
+****
+
+## System 参数调优
+
+****
+
+设置 linux 系统参数，例如：/proc/sys/net/ipv4/tcp_keepalive_time
+
+Linux 参数：
+
+- 进行tcp连接时，系统为每个tcp连接都会创建一个 socket 句柄，其实就是一个文件句柄（linux一切皆为文）
+- 但是系统对于每个进程能够打开的文件句柄数量做了限制，超出则报错：Too many open file
+- 设置方式：有很多种，ulimit -n [xxx]
+- 注意：该命令修改的数值，只对当前登录用户目前使用的环境有效，系统重启或用户退出后失效
+- 建议的做法是可以作为启动脚本的一部分，在启动程序前执行
+
+netty支持的系统参数设置，例如：serverbootstrap.option(ChannelOption.S0 BACKLOG,1024)，且设置形式有两种：
+
+- 针对SocketChannel：通过 .childOption 设置
+- 针对ServerSocketChannel：通过 .option 设置
+
+**ScoketChannel**：有 7 个参数可以设置，常用的两个：
+
+- SO_KEEPALIVE, tcp 层 keepalvie，默认关闭，一般选择关闭 tcp keepalive 而使用应用 keepalive
+- TCP_NODELAY：设置是否启用 nagle 算法，由于该算法是 tcp 在发送数据时将小的、碎片化的数据拼接成一个大的报文一起发送，以此来提高效率，默认是 false（启用），如果启用可能会导致有些数据有延时，如果业务不能忍受，小报文也需要立即发送则可以禁用该算法。
+
+**ServerSocketChannel**：有 3 个参数可以设置，常用的一个如下：
+
+- SO_BACKLOG:最大等待连接数量，netty在linux下该值的获取是通过：io.netty.util.NetUtil完成的
+  - 先尝试获取：/proc/sys/net/core/somaxconn
+  - 然后尝试：sysctl
+  - 最终没有获取到使用默认值：PlatformDependent.isWindows()? 200 : 128;
+
+****
+
+## 线程模型优化
+
+****
+
+根据实际需求将业务进行分类：
+
+![](https://lys2021.com/wp-content/uploads/2024/04/QQ截图20240427061527.png)
+
+****
+
+# Netty 零拷贝
+
+****
+
+## 操作系统中的零拷贝
+
+****
+
+系统内核处理 IO 操作分为两个阶段：
+
+- 等待数据：系统内核在等待网卡接收到数据后，把数据写到内核中
+- 拷贝数据：系统内核在获取到数据后，将数据拷贝到用户进程的空间中
+
+![image-20240427061902740](https://image.itbaima.cn/images/40/image-20240427069685157.png)
+
+在 OS 层面上的 Zero-copy 通常指避免在用户态（User-space）与内核态（Kernel-space）之间来回拷贝数据
+
+例如，Linux 提供的 mmap 系统调用：
+
+- 它可以将一段用户空间内存映射到内核空间，当映射成功后，用户对这段内存区域的修改可以直接反映到内核空间
+- 同样地, 内核空间对这段区域的修改也直接反映用户空间
+
+正因为有这样的映射关系, 我们就不需要在 用户态（User-space）与 内核态（Kernel-space）之间拷贝数据，提高了数据传输的效率
+
+![image-20240427062206854](https://image.itbaima.cn/images/40/image-20240427066633070.png)
+
+通过java的 FileChannel.transferTo 方法（底层基于NIO)，可以避免多余的拷贝（当然这需要底层操作系统的支持)
+
+****
+
+## Netty 中的零拷贝
+
+****
+
+Netty 中的 Zero-copy 与上面我们所提到到 OS 层面上的 Zero-copy 不太一样。
+
+Netty 的 Zero-coyp 完全是在用户态（Java层面）的，它的 Zero-copy 的更多的是偏向于优化数据操作这样的概念，Netty 的 Zero-copy 主要体现在如下几个方面：
+
+- Direct Buffer：
+  - 直接堆外内存区域分配空间而不是在堆内存中分配
+  - 如果使用传统的堆内存分配，当我们需要将数据通过 socket 发送的时候，需要将数据从堆内存拷贝到堆外直接内存，然后再由直接内存拷贝到网卡接口层
+  - 通过Netty提供的 DirectBuffers 直接将数据分配到堆外内存，避免多余的数据拷贝
+- Composite Buffers：
+  - 传统的ByteBuffer，如果需要将两个ByteBuffert中的数据组合到一起，我们需要首先创建一个 size = size1+ size2 大小的新的数组然后将两个数组中的数据拷贝到新的数组中
+  - 但是使用 Netty 提供的组合 ByteBuf 就可以避免这样的操作，因为 Composite ByteBuf 并没有真正将多个Buffer组合起来，而是保存了它们的引用，从而避免了数据的拷贝，实现了零拷贝
+  - 同时也支持 slice 操作，因此可以将 ByteBuf 分解为多个共享同一个存储区域的 ByteBuf 避免了内存的拷贝
+- 通过 wrap 操作：
+  - 我们可以将 byte[] 数组、ByteBuf、ByteBuffer 等包装成一个 Netty ByteBuf 对象，进而避免了拷贝操作
+- 通过 FileRegion：
+  - 利用 FileRegion 包装的 FileChannel.tranferTo(Java nio) 实现文件传输
+  - 可以直接将文件缓冲区的数据发送到目标 Channel，避免了传统通过循环 write 方式导致的内存拷贝问题
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
