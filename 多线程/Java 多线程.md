@@ -656,7 +656,7 @@ private void addWorkerFailed(Worker w) {
 - 第二次，如果 workerCountOf(recheck) == 0： 如果worker的数量为0，那就 addWorker(null,false)。为什么这里是 null ？之前已经把command提交到阻塞队列了workQueue.offer(command)。所以提交一个空线程，直接从阻塞队列里面取就可以了。
 - 第三次，如果线程池没有RUNNING或者offer阻塞队列失败，addWorker(command,false)：说明阻塞队列满了，将任务提交到非核心线程池。
 
-上面的分析逻辑中需要注意一点，Worker实例创建的同时，在其构造函数中会通过ThreadFactory创建一个Java线程Thread实例，后面会加锁后二次检查是否需要把Worker实例添加到工作线程集合workers中和是否需要启动Worker中持有的Thread实例，只有启动了Thread实例实例，Worker才真正开始运作，否则只是一个无用的临时对象。Worker本身也实现了Runnable接口，它可以看成是一个Runnable的适配器。
+上面的分析逻辑中需要注意一点，Worker 实例创建的同时，在其构造函数中会通过 ThreadFactory 创建一个Java线程Thread实例，后面会加锁后二次检查是否需要把Worker实例添加到工作线程集合workers中和是否需要启动Worker中持有的Thread实例，只有启动了Thread实例实例，Worker才真正开始运作，否则只是一个无用的临时对象。Worker本身也实现了Runnable接口，它可以看成是一个Runnable的适配器。
 
 ****
 
