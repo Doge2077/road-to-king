@@ -347,24 +347,6 @@ public class Person {
 
 ****
 
-### 源码
-
-****
-
-源码 Object 类中定义如下：
-
-```java
-// 是一个用 native 声明的本地方法，作用是返回对象的散列码，是 int 类型的数值。
-public native int hashCode();
-```
-
-- HashCode的存在主要是为了查找的快捷性
-- HashCode是用来在散列存储结构中确定对象的存储地址
-
-例：比如使用集合 List,Set，还有 Map，List集合一般是存放的元素是有序可重复的，Set 存放的元素则是无序不可重复的，而 Map 集合存放的是键值对。
-
-****
-
 ### hashCode 作用
 
 ****
@@ -396,4 +378,245 @@ hashCode 的值存在Java对象头里的，Hotspot虚拟机的对象头主要包
 
 - Mark Word（标记字段）：对象指向它的类元数据的指针，虚拟机通过这个指针来确定这个对象是哪个类的实例
 - Class Pointer（类型指针）：用于存储对象自身的运行时数据，它是实现轻量级锁和偏向锁的关键
+
+对象头结构如下：
+
+![](https://lys2021.com/wp-content/uploads/2024/10/image-20220228140424617.png)
+
+![](https://lys2021.com/wp-content/uploads/2024/10/image-20220228140345317.png)
+
+****
+
+### 源码解析
+
+****
+
+源码 Object 类中定义如下：
+
+```java
+// 是一个用 native 声明的本地方法，作用是返回对象的散列码，是 int 类型的数值。
+public native int hashCode();
+```
+
+- HashCode的存在主要是为了查找的快捷性
+- HashCode是用来在散列存储结构中确定对象的存储地址
+
+查看：`src\share\native\java\lang\Object.c`
+
+```cpp
+JNIEXPORT void JNICALL//jni调用
+//全路径：java_lang_Object_registerNatives是java对应的包下方法
+Java_java_lang_Object_registerNatives(JNIEnv *env, jclass cls)
+{
+     //jni环境调用；下面的参数methods对应的java方法
+    (*env)->RegisterNatives(env, cls,
+                            methods, sizeof(methods)/sizeof(methods[0]));
+}
+```
+
+对应方法：
+
+```cpp
+static JNINativeMethod methods[] = {
+    //JAVA方法        返回值  （参数）                          c++函数
+    {"hashCode",    "()I",                    (void *)&JVM_IHashCode},
+    {"wait",        "(J)V",                   (void *)&JVM_MonitorWait},
+    {"notify",      "()V",                    (void *)&JVM_MonitorNotify},
+    {"notifyAll",   "()V",                    (void *)&JVM_MonitorNotifyAll},
+    {"clone",       "()Ljava/lang/Object;",   (void *)&JVM_Clone},
+};
+```
+
+调用 [src\share\vm\prims\jvm.cpp](https://cr.openjdk.org/~kevinw/webrev.00/src/share/vm/prims/jvm.cpp-.html) JVM_IHashCod 方法：
+
+```cpp
+/*
+JVM_ENTRY is a preprocessor macro that
+adds some boilerplate code that is common for all functions of HotSpot JVM API.
+This API is a connection layer between the native code of JDK class library and the JVM.
+
+JVM_ENTRY是一个预加载宏，增加一些样板代码到jvm的所有function中
+这个api是位于本地方法与jdk之间的一个连接层。
+
+所以，此处才是生成hashCode的逻辑！
+*/
+JVM_ENTRY(jint, JVM_IHashCode(JNIEnv* env, jobject handle))
+  JVMWrapper("JVM_IHashCode");
+  //调用了ObjectSynchronizer对象的FastHashCode
+ return handle == NULL ? 0 : ObjectSynchronizer::FastHashCode (THREAD, JNIHandles::resolve_non_null(handle)) ;
+JVM_END
+```
+
+调用 [src/hotspot/share/runtime/synchronizer.cpp](https://cr.openjdk.org/~vlivanov/location_aware_resource_mark/macro/webrev.00/src/hotspot/share/runtime/synchronizer.cpp.html) 内部的 ObjectSynchronizer::FastHashCode：
+
+```cpp
+intptr_t ObjectSynchronizer::FastHashCode (Thread * Self, oop obj) {
+    //是否开启了偏向锁(Biased：偏向，倾向)
+  if (UseBiasedLocking) {
+    //如果当前对象处于偏向锁状态
+    if (obj->mark()->has_bias_pattern()) {
+      Handle hobj (Self, obj) ;
+      assert (Universe::verify_in_progress() ||
+              !SafepointSynchronize::is_at_safepoint(),
+             "biases should not be seen by VM thread here");
+            //那么就撤销偏向锁（达到无锁状态，revoke：废除）
+      BiasedLocking::revoke_and_rebias(hobj, false, JavaThread::current());
+      obj = hobj() ;
+        //断言下，看看是否撤销成功（撤销后为无锁状态）
+      assert(!obj->mark()->has_bias_pattern(), "biases should be revoked by now");
+    }
+  }
+
+  // ……
+
+  ObjectMonitor* monitor = NULL;
+  markOop temp, test;
+  intptr_t hash;
+  //读出一个稳定的mark;防止对象obj处于膨胀状态；
+  //如果正在膨胀，就等他膨胀完毕再读出来
+  markOop mark = ReadStableMark (obj);
+
+    //是否撤销了偏向锁（也就是无锁状态）（neutral：中立，不偏不斜的）
+  if (mark->is_neutral()) {
+    //从mark头上取hash值
+    hash = mark->hash(); 
+    //如果有，直接返回这个hashcode（xor）
+    if (hash) {                       // if it has hash, just return it
+      return hash;
+    }
+        //如果没有就新生成一个(get_next_hash)
+    hash = get_next_hash(Self, obj);  // allocate a new hash code
+    //生成后，原子性设置，将hash放在对象头里去，这样下次就可以直接取了
+    temp = mark->copy_set_hash(hash); // merge the hash code into header
+    // use (machine word version) atomic operation to install the hash
+    test = (markOop) Atomic::cmpxchg_ptr(temp, obj->mark_addr(), mark);
+    if (test == mark) {
+      return hash;
+    }
+    // If atomic operation failed, we must inflate the header
+    // into heavy weight monitor. We could add more code here
+    // for fast path, but it does not worth the complexity.
+    //如果已经升级成了重量级锁，那么找到它的monitor
+    //也就是我们所说的内置锁(objectMonitor)，这是c里的数据类型
+    //因为锁升级后，mark里的bit位已经不再存储hashcode，而是指向monitor的地址
+    //而升级的markword呢？被移到了c的monitor里
+  } else if (mark->has_monitor()) {
+    //沿着monitor找header，也就是对象头
+    monitor = mark->monitor();
+    temp = monitor->header();
+    assert (temp->is_neutral(), "invariant") ;
+    //找到header后取hash返回
+    hash = temp->hash();
+    if (hash) {
+      return hash;
+    }
+    // Skip to the following code to reduce code size
+  } else if (Self->is_lock_owned((address)mark->locker())) {
+    //轻量级锁的话，也是从java对象头移到了c里，叫helper
+    temp = mark->displaced_mark_helper(); // this is a lightweight monitor owned
+    assert (temp->is_neutral(), "invariant") ;
+    hash = temp->hash();              // by current thread, check if the displaced
+    //找到，返回
+    if (hash) {                       // header contains hash code
+      return hash;
+    }
+  }
+```
+
+总结：
+
+通过分析虚拟机源码我们证明了hashCode不是直接用的内存地址，而是采取一定的算法来生成，hashcode值的存储在mark word里，与锁共用一段bit位，这就造成了跟锁状态相关性：
+
+- 如果是无锁态：调用 hashcode 方法侯，hashcode 存储在该对象的对象头中
+- 如果是偏向锁：一旦调用hashcode，偏向锁将被撤销，hashcode被保存占位mark word，对象被打回无锁状态
+
+- 如果无法撤销偏向锁：对象再也回不到偏向锁状态而是升级为重量级锁hash code跟随mark word被移动到c的object monitor，从那里取
+
+****
+
+## getClass 方法
+
+****
+
+getClass()在 Object 类中如下，作用是返回对象的运行时类。
+
+```java
+public final native Class<?> getClass();
+```
+
+这是一个用 native 关键字修饰的方法
+
+> native 用来修饰方法，用 native 声明的方法表示告知 JVM 调用，该方法在外部定义，我们可以用任何语言去实现它。 
+>
+> 简单地讲，一个native Method就是一个 Java 调用非 Java 代码的接口。
+
+这里我们要知道用 native 修饰的方法我们不用考虑，由操作系统帮我们实现，该方法的作用是返回一个对象的运行时类，通过这个类对象我们可以获取该运行时类的相关属性和方法
+
+****
+
+## toString 方法
+
+****
+
+```java
+public String toString() {
+	return getClass().getName() + "@" + Integer.toHexString(hashCode());
+}
+```
+
+- getClass().getName()是返回对象的全类名（包含包名）,Integer.toHexString(hashCode()) 是以16进制无符号整数形式返回此哈希码的字符串表示形式。
+- 打印某个对象时，默认是调用 toString 方法，比如 System.out.println(person),等价于 System.out.println(person.toString())
+
+****
+
+## clone方法
+
+****
+
+```java
+/**
+* 本地clone方法,用于对象的复制
+*/
+protected native Object clone() throws CloneNotSupportedException;
+```
+
+保护方法，实现对象的浅拷贝，只有实现了Cloneable接口才可以调用该方法，否则抛出CloneNotSupportedException异常。
+
+****
+
+## finalize 方法
+
+****
+
+```java
+protected void finalize() throws Throwable { }
+```
+
+当 GC 确定不再有对该对象的引用时，GC 会调用对象的 `finalize()` 方法来清除回收。
+
+Java VM 会确保一个对象的 `finalize()` 方法只被调用一次，而且程序中不能直接调用 `finalize()` 方法。
+
+`finalize()` 方法通常也不可预测，而且很危险，一般情况下，不必要覆盖 `finalize()` 方法。
+
+****
+
+## registerNatives 方法
+
+****
+
+```java
+private static native void registerNatives();
+```
+
+这是一个本地方法，我们要知道一个类定义了本地方法后，想要调用操作系统的实现，**必须还要装载本地库**
+
+```java
+static {
+	registerNatives();
+}
+```
+
+静态代码块就是一个类在初始化过程中必定会执行的内容，所以在类加载的时候是会执行该方法的，通过该方法来注册本地方法。
+
+****
 
